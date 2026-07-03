@@ -21,10 +21,14 @@ JS_IMPORT_RE = re.compile(
 JS_EXTS = (".ts", ".tsx", ".js", ".jsx", ".mjs")
 
 
-def collect(repo):
-    """Return [{"from": dir, "to": dir, "lang": lang, "count": n}] sorted by count."""
+def collect(repo, tree=None):
+    """Return [{"from": dir, "to": dir, "lang": lang, "count": n}] sorted by count.
+
+    tree: optional pre-built {rel_dir: filenames} to avoid re-walking the repo.
+    """
     counter = Counter()
-    tree = {rel: files for rel, files in walk(repo)}
+    if tree is None:
+        tree = {rel: files for rel, files in walk(repo)}
     dirs = set(tree)
 
     _go_edges(repo, tree, counter)
@@ -104,7 +108,7 @@ def _py_edges(repo, tree, dirs, counter):
                 continue
             try:
                 node = ast.parse(_read(repo, rel, f))
-            except SyntaxError:
+            except (SyntaxError, ValueError):  # ValueError: null bytes on py<=3.11
                 continue
             for stmt in ast.walk(node):
                 if isinstance(stmt, ast.Import):

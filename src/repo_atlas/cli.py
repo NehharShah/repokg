@@ -6,7 +6,7 @@ import json
 import os
 import sys
 
-from . import __version__, code, deps, github, gitinfo, markdown, ops, prompts
+from . import __version__, code, deps, github, gitinfo, inject, markdown, ops, prompts
 
 
 def scan(repo, out, no_github, pr_limit):
@@ -16,18 +16,19 @@ def scan(repo, out, no_github, pr_limit):
     else:
         prs, note = github.collect(repo, pr_limit)
     github.classify(branches, prs, info["trunk"], info["integration"])
-    languages, modules = code.collect(repo)
+    tree = dict(code.walk(repo))  # single filesystem walk, shared by all collectors
+    languages, modules = code.collect(repo, tree)
     atlas = {
         "atlas_version": 1,
         "generated_at": datetime.date.today().isoformat(),
         "repo": info,
         "languages": languages,
         "modules": modules,
-        "edges": deps.collect(repo),
+        "edges": deps.collect(repo, tree),
         "branches": branches,
         "prs": prs,
         "github_note": note,
-        "ops": ops.collect(repo),
+        "ops": ops.collect(repo, tree),
     }
     os.makedirs(out, exist_ok=True)
     path = os.path.join(out, "atlas.json")
@@ -62,16 +63,41 @@ def render(out, md):
     print("wrote %s (%s)" % (md, state))
 
 
+def do_inject(repo, md):
+    for path, status in inject.run(repo, md).items():
+        print("%s: %s" % (path, status))
+
+
+def check(repo, out, md):
+    """Exit 0 if the atlas matches HEAD, 1 if stale/missing. CI-friendly."""
+    apath = os.path.join(out, "atlas.json")
+    if not os.path.isfile(apath) or not os.path.isfile(md):
+        print("stale: atlas not generated (run `repo-atlas generate`)")
+        return 1
+    with open(apath, encoding="utf-8") as f:
+        stored = json.load(f).get("repo", {}).get("head", "")
+    head = gitinfo.try_run(repo, "rev-parse", "HEAD")
+    if stored and head and stored != head:
+        print("stale: atlas at %s, HEAD is %s (run `repo-atlas generate`)"
+              % (stored[:12], head[:12]))
+        return 1
+    print("fresh: atlas matches HEAD %s" % (head[:12] or "(unknown)"))
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="repo-atlas",
         description="Generate an AI-ready knowledge graph of a codebase.")
     ap.add_argument("command", nargs="?", default="generate",
-                    choices=["scan", "prompts", "render", "generate", "version"],
+                    choices=["scan", "prompts", "render", "generate", "inject",
+                             "check", "version"],
                     help="scan: extract structure to .atlas/atlas.json | "
                          "prompts: write the AI enrichment prompt | "
                          "render: atlas.json (+narratives.json) -> ATLAS.md | "
-                         "generate: scan + prompts + render (default)")
+                         "generate: scan + prompts + render (default) | "
+                         "inject: add atlas pointer to CLAUDE.md/AGENTS.md/cursor rules | "
+                         "check: exit 1 if atlas is stale vs HEAD")
     ap.add_argument("path", nargs="?", default=".", help="repository path (default: .)")
     ap.add_argument("--out", default=None, help="output dir (default: <repo>/.atlas)")
     ap.add_argument("--md", default=None, help="markdown output (default: <repo>/ATLAS.md)")
@@ -97,6 +123,10 @@ def main(argv=None):
             write_prompts(repo, out, md)
         elif args.command == "render":
             render(out, md)
+        elif args.command == "inject":
+            do_inject(repo, md)
+        elif args.command == "check":
+            return check(repo, out, md)
         else:  # generate
             scan(repo, out, args.no_github, args.pr_limit)
             write_prompts(repo, out, md)

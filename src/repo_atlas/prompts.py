@@ -40,10 +40,12 @@ cannot produce — and to verify every claim by actually reading the code.
 }}
 ```
 
-7. Re-render the final document:
+7. Re-render the final document, and wire it into this repo's agent context files
+   (CLAUDE.md / AGENTS.md / Cursor rules) so future agents find it:
 
 ```sh
 repo-atlas render {repo}
+repo-atlas inject {repo}
 ```
 
 ## Quality bar

@@ -8,13 +8,21 @@ from .code import walk
 WORKFLOW_NAME_RE = re.compile(r"^name:\s*['\"]?(.+?)['\"]?\s*$", re.M)
 MAKE_TARGET_RE = re.compile(r"^([A-Za-z0-9][\w./-]*)\s*:(?!=)", re.M)
 
+# Existing AI-agent context surfaces worth reporting (and injecting into).
+AGENT_CONTEXT = (
+    "CLAUDE.md", "AGENTS.md", ".cursorrules", ".windsurfrules",
+    ".github/copilot-instructions.md", ".cursor/rules", ".claude", ".clinerules",
+)
 
-def collect(repo):
+
+def collect(repo, tree=None):
     ops = {
         "workflows": [], "dockerfiles": [], "compose": [], "helm_charts": [],
         "makefile_targets": [], "config_dirs": [], "docs": [], "test_dirs": [],
-        "migration_dirs": [], "proto_dirs": [],
+        "migration_dirs": [], "proto_dirs": [], "agent_context": [],
     }
+    ops["agent_context"] = [p for p in AGENT_CONTEXT
+                            if os.path.exists(os.path.join(repo, p))]
 
     wf_dir = os.path.join(repo, ".github", "workflows")
     if os.path.isdir(wf_dir):
@@ -25,7 +33,7 @@ def collect(repo):
                     {"file": ".github/workflows/" + f,
                      "name": m.group(1) if m else f})
 
-    for rel, files in walk(repo):
+    for rel, files in (tree.items() if tree is not None else walk(repo)):
         base = os.path.basename(rel)
         for f in files:
             p = (rel + "/" + f) if rel else f

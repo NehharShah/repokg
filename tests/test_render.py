@@ -24,16 +24,20 @@ ATLAS = {
     ],
     "prs": [
         {"number": 1, "title": "feat(app): initial", "state": "MERGED", "head": "feat/init",
-         "author": "a", "created": "2026-01-02", "merged": "2026-01-03", "closed": "",
+         "author": "a", "created": "2026-01-02", "merged": "2026-03-03", "closed": "",
          "draft": False},
         {"number": 2, "title": "fix(app): bug | pipe", "state": "OPEN", "head": "feat/x",
          "author": "a", "created": "2026-07-02", "merged": "", "closed": "", "draft": False},
+        {"number": 3, "title": "feat(app): earlier merge, higher number", "state": "MERGED",
+         "head": "feat/y", "author": "a", "created": "2026-01-01", "merged": "2026-01-05",
+         "closed": "", "draft": False},
     ],
     "github_note": "",
     "ops": {"workflows": [{"file": ".github/workflows/ci.yml", "name": "CI"}],
             "dockerfiles": ["Dockerfile"], "compose": [], "helm_charts": [],
             "makefile_targets": ["test"], "config_dirs": [], "docs": [],
-            "test_dirs": ["tests"], "migration_dirs": [], "proto_dirs": []},
+            "test_dirs": ["tests"], "migration_dirs": [], "proto_dirs": [],
+            "agent_context": ["CLAUDE.md"]},
 }
 
 
@@ -50,8 +54,14 @@ class TestRender(unittest.TestCase):
         doc = render(ATLAS, {})
         for needle in ("# demo — Codebase Atlas", "## 1. Repo at a glance",
                        "```mermaid", "src/app", "pending enrichment",
-                       "Open PRs", "Appendix A", "bug \\| pipe", "## 7. Timeline"):
+                       "Open PRs", "Appendix A", "bug \\| pipe", "## 7. Timeline",
+                       "Agent context files"):
             self.assertIn(needle, doc)
+
+    def test_timeline_chronological_despite_pr_number_order(self):
+        doc = render(ATLAS, {})
+        # PR #3 merged 2026-01, PR #1 merged 2026-03: month rows must be sorted by date
+        self.assertLess(doc.index("| 2026-01 |"), doc.index("| 2026-03 |"))
 
     def test_render_enriched(self):
         n = {"overview": "Demo overview.",

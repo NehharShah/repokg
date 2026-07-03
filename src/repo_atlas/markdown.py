@@ -247,7 +247,7 @@ def _timeline_section(w, prs, n):
         w("")
         return
     months = OrderedDict()
-    for p in merged:
+    for p in sorted(merged, key=lambda x: x["merged"]):
         months.setdefault(p["merged"][:7], []).append(p)
     w("| Month | Merged PRs | Top scopes | Sample |")
     w("|---|---:|---|---|")
@@ -266,6 +266,10 @@ def _timeline_section(w, prs, n):
 def _ops_section(w, ops):
     w("## 8. Ops surface")
     w("")
+    if ops.get("agent_context"):
+        w("**Agent context files (read and respect these):** " +
+          ", ".join("`%s`" % x for x in ops["agent_context"]))
+        w("")
     if ops.get("workflows"):
         w("**CI workflows:** " + "; ".join(
             "%s (`%s`)" % (x["name"], x["file"]) for x in ops["workflows"]))

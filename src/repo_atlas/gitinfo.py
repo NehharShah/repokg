@@ -50,19 +50,30 @@ def collect(repo):
     trunk = _detect_trunk(repo, names, use_remote)
     integration = next((c for c in INTEGRATION_CANDIDATES if c in names and c != trunk), "")
     base = integration or trunk
-    base_ref = ("origin/" + base) if use_remote else base
+    base_ref = ("origin/" + base) if (use_remote and base) else base
+    prefix = "refs/remotes/origin" if use_remote else "refs/heads"
 
-    merged_refs = set()
+    merged_refs, ahead_map = set(), {}
     if base_ref:
-        prefix = "refs/remotes/origin" if use_remote else "refs/heads"
         out = try_run(repo, "for-each-ref", prefix, "--merged=" + base_ref,
                       "--format=%(refname:short)")
         merged_refs = set(out.splitlines())
+        # One call for all ahead counts (git >= 2.41); fall back per-branch below.
+        out = try_run(repo, "for-each-ref", prefix,
+                      "--format=%(refname:short)%09%(ahead-behind:" + base_ref + ")")
+        for line in out.splitlines():
+            parts = line.split("\t")
+            if len(parts) == 2:
+                nums = parts[1].split()
+                if len(nums) == 2 and nums[0].isdigit():
+                    ahead_map[parts[0]] = int(nums[0])
 
     for b in branches:
         b["merged_ancestry"] = b["ref"] in merged_refs
-        if b["name"] in (trunk, integration) or b["merged_ancestry"]:
+        if b["name"] in (trunk, integration) or b["merged_ancestry"] or not base_ref:
             b["ahead"] = 0
+        elif b["ref"] in ahead_map:
+            b["ahead"] = ahead_map[b["ref"]]
         else:
             n = try_run(repo, "rev-list", "--count", "%s..%s" % (base_ref, b["ref"]))
             b["ahead"] = int(n) if n.isdigit() else 0
@@ -81,6 +92,7 @@ def collect(repo):
         "path": top,
         "name": _repo_name(remote, top),
         "remote": remote,
+        "head": try_run(repo, "rev-parse", "HEAD"),
         "trunk": trunk,
         "integration": integration,
         "default_base": base,

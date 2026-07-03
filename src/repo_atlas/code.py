@@ -62,15 +62,16 @@ def count_loc(path):
         return 0
 
 
-def collect(repo):
+def collect(repo, tree=None):
     """Return (languages, modules).
 
     languages: [{lang, files, loc}] sorted by loc desc
     modules:   [{path, lang, files, loc, root, generated}] one per dir containing code
+    tree: optional pre-built {rel_dir: filenames} to avoid re-walking the repo.
     """
     lang_stats = {}
     modules = []
-    for rel, files in walk(repo):
+    for rel, files in (tree.items() if tree is not None else walk(repo)):
         if rel.startswith(".github"):
             continue
         per_lang = {}
