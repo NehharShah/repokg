@@ -52,6 +52,7 @@ def render(kg, narratives=None):
     _timeline_section(w, prs, n)
     _ops_section(w, kg.get("ops", {}))
     _gotchas_section(w, n)
+    _extra_sections(w, n)
     _pr_appendix(w, prs)
 
     return "\n".join(out).rstrip() + "\n"
@@ -300,6 +301,16 @@ def _gotchas_section(w, n):
     for g in gotchas:
         w("- %s" % g)
     w("")
+
+
+def _extra_sections(w, n):
+    """Free-form enrichment sections — arbitrary depth the fixed schema can't hold
+    (environments, revert sagas, deep architecture narrative, ...)."""
+    for s in n.get("sections") or []:
+        w("## %s" % s.get("title", "Section"))
+        w("")
+        w(s.get("body", "").strip())
+        w("")
 
 
 def _pr_appendix(w, prs):

@@ -5,7 +5,7 @@ a half-broken document. Validate loudly instead, with errors precise enough
 for the agent to self-correct.
 """
 
-ALLOWED_KEYS = {"overview", "modules", "flows", "timeline", "gotchas"}
+ALLOWED_KEYS = {"overview", "modules", "flows", "timeline", "gotchas", "sections"}
 
 
 def narratives(n):
@@ -53,5 +53,14 @@ def narratives(n):
     gotchas = n.get("gotchas", [])
     if not isinstance(gotchas, list) or not all(isinstance(g, str) for g in gotchas):
         errs.append("gotchas must be a list of strings")
+
+    sections = n.get("sections", [])
+    if not isinstance(sections, list):
+        errs.append("sections must be a list")
+    else:
+        for i, s in enumerate(sections):
+            if not isinstance(s, dict) or not isinstance(s.get("title"), str) \
+                    or not isinstance(s.get("body"), str):
+                errs.append("sections[%d] must be {title: str, body: str (markdown)}" % i)
 
     return errs

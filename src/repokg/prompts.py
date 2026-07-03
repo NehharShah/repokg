@@ -37,7 +37,11 @@ cannot produce — and to verify every claim by actually reading the code.
   "timeline": [
     {{"period": "2026-01", "theme": "What happened in this era, with PR numbers."}}
   ],
-  "gotchas": ["Non-obvious fact an AI or new dev must know before editing."]
+  "gotchas": ["Non-obvious fact an AI or new dev must know before editing."],
+  "sections": [
+    {{"title": "Environments & deploys",
+      "body": "Free-form **markdown** for depth the fixed fields can't hold:\nenvironment tables, revert sagas, architecture narrative, mermaid diagrams."}}
+  ]
 }}
 ```
 
