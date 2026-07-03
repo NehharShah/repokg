@@ -68,10 +68,13 @@ class TestRender(unittest.TestCase):
              "modules": {"src/app": "The app."},
              "flows": [{"name": "Main flow", "steps": ["in", "out"]}],
              "timeline": [{"period": "2026-01", "theme": "built it"}],
-             "gotchas": ["watch out"]}
+             "gotchas": ["watch out"],
+             "sections": [{"title": "Extra depth", "body": "Custom **markdown** body."}]}
         doc = render(KG, n)
+        # free-form sections render before the PR appendix
+        self.assertLess(doc.index("## Extra depth"), doc.index("## Appendix A"))
         for needle in ("Demo overview.", "The app.", "Main flow",
-                       "built it", "watch out"):
+                       "built it", "watch out", "Custom **markdown** body."):
             self.assertIn(needle, doc)
         self.assertNotIn("pending enrichment", doc.split("src/app")[1].split("\n")[0])
 

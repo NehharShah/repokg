@@ -31,6 +31,15 @@ class TestValidate(unittest.TestCase):
         errs = narratives({"flows": [{"name": "f", "steps": [1]}]})
         self.assertIn("flows[0].steps", errs[0])
 
+    def test_sections_valid(self):
+        n = {"sections": [{"title": "Environments", "body": "| a | b |"}]}
+        self.assertEqual(narratives(n), [])
+
+    def test_sections_invalid(self):
+        self.assertIn("sections must be a list", narratives({"sections": {}})[0])
+        errs = narratives({"sections": [{"title": "x"}]})
+        self.assertIn("sections[0]", errs[0])
+
     def test_bad_timeline_and_gotchas(self):
         self.assertIn("timeline[0]", narratives({"timeline": [{"period": "x"}]})[0])
         self.assertIn("gotchas", narratives({"gotchas": "not a list"})[0])
