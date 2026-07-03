@@ -155,6 +155,12 @@ python -m unittest discover -s tests -v
 
 No runtime dependencies — stdlib only.
 
+## Contributing
+
+All work goes through issue → branch (`issue-<N>/<desc>`) → PR → review → squash-merge to `main`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow and the ground rules
+(zero deps, findings for heuristics, `clean` reversibility).
+
 ## License
 
 MIT
