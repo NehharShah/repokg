@@ -5,7 +5,7 @@ import re
 
 SKIP_DIRS = {
     ".git", "node_modules", "vendor", "dist", "build", "out", "target", ".next",
-    ".venv", "venv", "__pycache__", ".idea", ".vscode", ".atlas", "coverage",
+    ".venv", "venv", "__pycache__", ".idea", ".vscode", ".repokg", "coverage",
     ".terraform", "third_party", ".tox", ".mypy_cache", ".ruff_cache",
     "site-packages", ".pytest_cache", ".cache",
 }

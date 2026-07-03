@@ -2,6 +2,6 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-.atlas/
-ATLAS.md
+.repokg/
+KNOWLEDGE_GRAPH.md
 .venv/

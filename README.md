@@ -1,93 +1,93 @@
-# repo-atlas
+# repokg
 
 Generate an **AI-ready knowledge graph** of any codebase — so an AI agent (or a new
 developer) can read one file and start building immediately.
 
-`repo-atlas` extracts everything that can be known *deterministically* about a repo —
+`repokg` extracts everything that can be known *deterministically* about a repo —
 module inventory, internal import graph, every branch classified against every PR
 (merged / squash-merged / abandoned / stale), contributor stats, CI/Docker/Helm/Make
 surface — and renders it as:
 
-- **`ATLAS.md`** — a single human/AI-readable document with a mermaid architecture
+- **`KNOWLEDGE_GRAPH.md`** — a single human/AI-readable document with a mermaid architecture
   graph, module tables, branch & PR catalog, timeline, and ops inventory.
-- **`.atlas/atlas.json`** — the same graph, machine-readable.
+- **`.repokg/kg.json`** — the same graph, machine-readable.
 
 The semantic layer (module purposes, data-flow narratives, project eras, gotchas)
-can't be produced by static analysis without guessing — so repo-atlas is
-**agent-first**: it emits `.atlas/prompts/enrich.md`, a rigorous prompt any AI coding
+can't be produced by static analysis without guessing — so repokg is
+**agent-first**: it emits `.repokg/prompts/enrich.md`, a rigorous prompt any AI coding
 agent (Claude Code, Cursor, Copilot Workspace…) executes to verify-and-fill the
-narrative sections, writing `.atlas/narratives.json`. Re-render and the atlas is
+narrative sections, writing `.repokg/narratives.json`. Re-render and the knowledge graph is
 complete. No API keys, no LLM dependency in the tool itself.
 
 ## Install
 
 ```sh
-pipx install repo-atlas        # or: pip install repo-atlas
+pipx install repokg        # or: pip install repokg
 # from source:
-pipx install git+https://github.com/NehharShah/repo-atlas
+pipx install git+https://github.com/NehharShah/repokg
 ```
 
 Requirements: Python ≥ 3.9, `git`. Optional: [`gh`](https://cli.github.com) (logged
-in) for the PR/branch cross-reference — without it the atlas still builds, minus PR data.
+in) for the PR/branch cross-reference — without it the knowledge graph still builds, minus PR data.
 
 ## Usage
 
 ```sh
 cd your-repo
-repo-atlas                      # = generate: scan + prompts + render
+repokg                      # = generate: scan + prompts + render
 ```
 
 Output:
 
 ```
-.atlas/atlas.json               # machine-readable knowledge graph
-.atlas/prompts/enrich.md        # hand this to your AI agent
-ATLAS.md                        # the knowledge graph document
+.repokg/kg.json               # machine-readable knowledge graph
+.repokg/prompts/enrich.md        # hand this to your AI agent
+KNOWLEDGE_GRAPH.md                        # the knowledge graph document
 ```
 
 Then, in your AI agent of choice:
 
-> Follow the instructions in .atlas/prompts/enrich.md
+> Follow the instructions in .repokg/prompts/enrich.md
 
-The agent explores the code, writes `.atlas/narratives.json`, and runs
-`repo-atlas render` — ATLAS.md now carries verified purposes, data flows,
+The agent explores the code, writes `.repokg/narratives.json`, and runs
+`repokg render` — KNOWLEDGE_GRAPH.md now carries verified purposes, data flows,
 timeline eras, and gotchas alongside the deterministic structure.
 
 ### Commands
 
 | Command | Effect |
 |---|---|
-| `repo-atlas scan [path]` | Extract structure → `.atlas/atlas.json` |
-| `repo-atlas prompts [path]` | Write the enrichment prompt |
-| `repo-atlas render [path]` | `atlas.json` (+ `narratives.json`) → `ATLAS.md` |
-| `repo-atlas generate [path]` | All three (default) |
-| `repo-atlas inject [path]` | Wire the atlas into `CLAUDE.md` / `AGENTS.md` / Cursor rules |
-| `repo-atlas check [path]` | Exit 1 if the atlas is stale vs `HEAD` (CI-friendly) |
+| `repokg scan [path]` | Extract structure → `.repokg/kg.json` |
+| `repokg prompts [path]` | Write the enrichment prompt |
+| `repokg render [path]` | `kg.json` (+ `narratives.json`) → `KNOWLEDGE_GRAPH.md` |
+| `repokg generate [path]` | All three (default) |
+| `repokg inject [path]` | Wire the knowledge graph into `CLAUDE.md` / `AGENTS.md` / Cursor rules |
+| `repokg check [path]` | Exit 1 if the knowledge graph is stale vs `HEAD` (CI-friendly) |
 
-Flags: `--out DIR` (default `<repo>/.atlas`), `--md FILE` (default `<repo>/ATLAS.md`),
+Flags: `--out DIR` (default `<repo>/.repokg`), `--md FILE` (default `<repo>/KNOWLEDGE_GRAPH.md`),
 `--no-github`, `--pr-limit N`.
 
 ## Agent integration
 
-`repo-atlas inject` adds a **managed block** (delimited by
-`<!-- repo-atlas:begin/end -->`, idempotent, never touches your hand-written
-content) pointing agents at ATLAS.md:
+`repokg inject` adds a **managed block** (delimited by
+`<!-- repokg:begin/end -->`, idempotent, never touches your hand-written
+content) pointing agents at KNOWLEDGE_GRAPH.md:
 
 - **`CLAUDE.md`** (Claude Code) — updated if present
 - **`AGENTS.md`** (the cross-tool agent standard) — updated if present, created if
   no agent file exists at all
 - **`.github/copilot-instructions.md`** (Copilot) — updated if present
-- **`.cursor/rules/repo-atlas.mdc`** (Cursor, with `alwaysApply: true`) — created
+- **`.cursor/rules/repokg.mdc`** (Cursor, with `alwaysApply: true`) — created
   if `.cursor/rules/` exists; falls back to legacy `.cursorrules`
 
 Keep it fresh in CI:
 
 ```yaml
-- run: pipx run repo-atlas check . || echo "::warning::ATLAS.md is stale"
+- run: pipx run repokg check . || echo "::warning::KNOWLEDGE_GRAPH.md is stale"
 ```
 
-ATLAS.md itself also lists any agent-context files it found, so an agent landing
-on the atlas discovers your rules — and vice versa.
+KNOWLEDGE_GRAPH.md itself also lists any agent-context files it found, so an agent landing
+on the knowledge graph discovers your rules — and vice versa.
 
 ## What gets extracted (all verified, never guessed)
 
@@ -123,7 +123,7 @@ schema — everything else stays deterministic and reproducible.
 
 - [ ] Rust / Java / Kotlin import graphs
 - [ ] `--exclude` glob patterns
-- [ ] `llms.txt` emission alongside ATLAS.md
+- [ ] `llms.txt` emission alongside KNOWLEDGE_GRAPH.md
 - [ ] tsconfig `paths` alias resolution
 - [ ] PyPI release + prebuilt GitHub Action
 

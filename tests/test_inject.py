@@ -2,14 +2,14 @@ import os
 import tempfile
 import unittest
 
-from repo_atlas.inject import BEGIN, END, run
+from repokg.inject import BEGIN, END, run
 
 
 class TestInject(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.repo = self.tmp.name
-        self.md = os.path.join(self.repo, "ATLAS.md")
+        self.md = os.path.join(self.repo, "KNOWLEDGE_GRAPH.md")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -23,7 +23,7 @@ class TestInject(unittest.TestCase):
         self.assertEqual(results, {"AGENTS.md": "created"})
         text = self._read("AGENTS.md")
         self.assertIn(BEGIN, text)
-        self.assertIn("ATLAS.md", text)
+        self.assertIn("KNOWLEDGE_GRAPH.md", text)
 
     def test_updates_existing_claude_md_preserving_content(self):
         path = os.path.join(self.repo, "CLAUDE.md")
@@ -57,14 +57,14 @@ class TestInject(unittest.TestCase):
     def test_cursor_rules_dir(self):
         os.makedirs(os.path.join(self.repo, ".cursor", "rules"))
         results = run(self.repo, self.md)
-        self.assertEqual(results[".cursor/rules/repo-atlas.mdc"], "created")
-        text = self._read(".cursor/rules/repo-atlas.mdc")
+        self.assertEqual(results[".cursor/rules/repokg.mdc"], "created")
+        text = self._read(".cursor/rules/repokg.mdc")
         self.assertTrue(text.startswith("---\n"))
         self.assertIn("alwaysApply: true", text)
         self.assertIn(BEGIN, text)
 
-    def test_atlas_outside_repo_uses_absolute_path(self):
-        outside = os.path.join(tempfile.gettempdir(), "elsewhere", "ATLAS.md")
+    def test_kg_outside_repo_uses_absolute_path(self):
+        outside = os.path.join(tempfile.gettempdir(), "elsewhere", "KNOWLEDGE_GRAPH.md")
         run(self.repo, outside)
         self.assertIn(outside, self._read("AGENTS.md"))
 

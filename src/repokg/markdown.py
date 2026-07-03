@@ -1,4 +1,4 @@
-"""Render ATLAS.md — the AI-ready knowledge graph document."""
+"""Render KNOWLEDGE_GRAPH.md — the AI-ready knowledge graph document."""
 
 import re
 from collections import Counter, OrderedDict
@@ -10,26 +10,26 @@ MAX_LIST = 30
 MERMAID_MAX_NODES = 28
 
 
-def render(atlas, narratives=None):
+def render(kg, narratives=None):
     n = narratives or {}
     out = []
     w = out.append
 
-    repo = atlas.get("repo", {})
-    prs = atlas.get("prs", [])
-    branches = atlas.get("branches", [])
-    modules = atlas.get("modules", [])
-    edges = atlas.get("edges", [])
+    repo = kg.get("repo", {})
+    prs = kg.get("prs", [])
+    branches = kg.get("branches", [])
+    modules = kg.get("modules", [])
+    edges = kg.get("edges", [])
     enriched = bool(n.get("modules") or n.get("overview"))
 
-    w("# %s — Codebase Atlas" % repo.get("name", "repository"))
+    w("# %s — Codebase Knowledge Graph" % repo.get("name", "repository"))
     w("")
-    w("> Machine-generated knowledge graph (by [repo-atlas](https://github.com/NehharShah/repo-atlas)) "
-      "on %s. Structure is extracted deterministically from git/GitHub/source;" % atlas.get("generated_at", ""))
+    w("> Machine-generated knowledge graph (by [repokg](https://github.com/NehharShah/repokg)) "
+      "on %s. Structure is extracted deterministically from git/GitHub/source;" % kg.get("generated_at", ""))
     if enriched:
         w("> narrative sections were enriched by an AI agent that verified claims against the code.")
     else:
-        w("> narrative sections are **not yet enriched** — run the prompt in `.atlas/prompts/enrich.md` "
+        w("> narrative sections are **not yet enriched** — run the prompt in `.repokg/prompts/enrich.md` "
           "with an AI agent to fill them in.")
     w("")
     w("## For AI agents — start here")
@@ -39,25 +39,25 @@ def render(atlas, narratives=None):
       "and what depends on what — trust these edges, they are extracted from imports.")
     w("- **§6 Branches & PRs** tells you what is in flight (`active`), what merged, and what was abandoned.")
     w("- **§7 Timeline** shows how the codebase evolved; **§8 Ops** shows how it builds/deploys.")
-    w("- Machine-readable version of everything: `.atlas/atlas.json`.")
+    w("- Machine-readable version of everything: `.repokg/kg.json`.")
     w("")
 
-    _repo_section(w, atlas, repo, prs, branches, n)
-    _languages_section(w, atlas)
+    _repo_section(w, kg, repo, prs, branches, n)
+    _languages_section(w, kg)
     _graph_section(w, edges)
     _modules_section(w, modules, n)
     _edges_section(w, edges)
     _flows_section(w, n)
-    _branches_section(w, repo, branches, prs, atlas)
+    _branches_section(w, repo, branches, prs, kg)
     _timeline_section(w, prs, n)
-    _ops_section(w, atlas.get("ops", {}))
+    _ops_section(w, kg.get("ops", {}))
     _gotchas_section(w, n)
     _pr_appendix(w, prs)
 
     return "\n".join(out).rstrip() + "\n"
 
 
-def _repo_section(w, atlas, repo, prs, branches, n):
+def _repo_section(w, kg, repo, prs, branches, n):
     w("## 1. Repo at a glance")
     w("")
     if n.get("overview"):
@@ -73,7 +73,7 @@ def _repo_section(w, atlas, repo, prs, branches, n):
         ("Commits", str(repo.get("commit_count", 0))),
         ("Contributors", contribs or "(unknown)"),
         ("Branches", str(len(branches))),
-        ("Pull requests", _pr_totals(prs, atlas)),
+        ("Pull requests", _pr_totals(prs, kg)),
     ]
     w("| Fact | Value |")
     w("|---|---|")
@@ -82,20 +82,20 @@ def _repo_section(w, atlas, repo, prs, branches, n):
     w("")
 
 
-def _pr_totals(prs, atlas):
+def _pr_totals(prs, kg):
     if not prs:
-        return atlas.get("github_note") or "0"
+        return kg.get("github_note") or "0"
     c = Counter(p["state"] for p in prs)
     return "%d total — %d merged / %d open / %d closed-unmerged" % (
         len(prs), c.get("MERGED", 0), c.get("OPEN", 0), c.get("CLOSED", 0))
 
 
-def _languages_section(w, atlas):
+def _languages_section(w, kg):
     w("## 2. Languages")
     w("")
     w("| Language | Files | LOC |")
     w("|---|---:|---:|")
-    for l in atlas.get("languages", [])[:15]:
+    for l in kg.get("languages", [])[:15]:
         w("| %s | %d | %d |" % (l["lang"], l["files"], l["loc"]))
     w("")
 
@@ -152,7 +152,7 @@ def _modules_section(w, modules, n):
           (m["path"], flags, m["lang"], m["files"], m["loc"], purpose))
     if len(modules) > len(shown):
         w("")
-        w("_… %d smaller modules omitted (see atlas.json)._" % (len(modules) - len(shown)))
+        w("_… %d smaller modules omitted (see kg.json)._" % (len(modules) - len(shown)))
     w("")
 
 
@@ -167,7 +167,7 @@ def _edges_section(w, edges):
     for e in shown:
         w("- `%s` → `%s` (%s, ×%d)" % (e["from"], e["to"], e["lang"], e["count"]))
     if len(edges) > len(shown):
-        w("- _… %d more edges in atlas.json_" % (len(edges) - len(shown)))
+        w("- _… %d more edges in kg.json_" % (len(edges) - len(shown)))
     w("")
 
 
@@ -184,7 +184,7 @@ def _flows_section(w, n):
         w("")
 
 
-def _branches_section(w, repo, branches, prs, atlas):
+def _branches_section(w, repo, branches, prs, kg):
     w("## 6. Branches & pull requests")
     w("")
     base = repo.get("default_base", "")
@@ -226,7 +226,7 @@ def _branches_section(w, repo, branches, prs, atlas):
             ahead = (" [+%d]" % b["ahead"]) if b.get("ahead") else ""
             w("- `%s` (%s)%s%s" % (b["name"], b.get("date", ""), ahead, pr_ref))
         if len(items) > MAX_LIST:
-            w("- _… %d more in atlas.json_" % (len(items) - MAX_LIST))
+            w("- _… %d more in kg.json_" % (len(items) - MAX_LIST))
         w("")
 
 

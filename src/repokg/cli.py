@@ -1,4 +1,4 @@
-"""repo-atlas CLI: scan | prompts | render | generate."""
+"""repokg CLI: scan | prompts | render | generate."""
 
 import argparse
 import datetime
@@ -18,8 +18,8 @@ def scan(repo, out, no_github, pr_limit):
     github.classify(branches, prs, info["trunk"], info["integration"])
     tree = dict(code.walk(repo))  # single filesystem walk, shared by all collectors
     languages, modules = code.collect(repo, tree)
-    atlas = {
-        "atlas_version": 1,
+    kg = {
+        "repokg_version": 1,
         "generated_at": datetime.date.today().isoformat(),
         "repo": info,
         "languages": languages,
@@ -31,12 +31,12 @@ def scan(repo, out, no_github, pr_limit):
         "ops": ops.collect(repo, tree),
     }
     os.makedirs(out, exist_ok=True)
-    path = os.path.join(out, "atlas.json")
+    path = os.path.join(out, "kg.json")
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(atlas, f, indent=1)
+        json.dump(kg, f, indent=1)
     print("wrote %s (%d modules, %d edges, %d branches, %d PRs)" %
-          (path, len(modules), len(atlas["edges"]), len(branches), len(prs)))
-    return atlas
+          (path, len(modules), len(kg["edges"]), len(branches), len(prs)))
+    return kg
 
 
 def write_prompts(repo, out, md):
@@ -49,17 +49,17 @@ def write_prompts(repo, out, md):
 
 
 def render(out, md):
-    with open(os.path.join(out, "atlas.json"), encoding="utf-8") as f:
-        atlas = json.load(f)
+    with open(os.path.join(out, "kg.json"), encoding="utf-8") as f:
+        kg = json.load(f)
     narratives = {}
     npath = os.path.join(out, "narratives.json")
     if os.path.isfile(npath):
         with open(npath, encoding="utf-8") as f:
             narratives = json.load(f)
-    doc = markdown.render(atlas, narratives)
+    doc = markdown.render(kg, narratives)
     with open(md, "w", encoding="utf-8") as f:
         f.write(doc)
-    state = "enriched" if narratives else "structure-only; run .atlas/prompts/enrich.md to enrich"
+    state = "enriched" if narratives else "structure-only; run .repokg/prompts/enrich.md to enrich"
     print("wrote %s (%s)" % (md, state))
 
 
@@ -69,52 +69,52 @@ def do_inject(repo, md):
 
 
 def check(repo, out, md):
-    """Exit 0 if the atlas matches HEAD, 1 if stale/missing. CI-friendly."""
-    apath = os.path.join(out, "atlas.json")
+    """Exit 0 if the knowledge graph matches HEAD, 1 if stale/missing. CI-friendly."""
+    apath = os.path.join(out, "kg.json")
     if not os.path.isfile(apath) or not os.path.isfile(md):
-        print("stale: atlas not generated (run `repo-atlas generate`)")
+        print("stale: knowledge graph not generated (run `repokg generate`)")
         return 1
     with open(apath, encoding="utf-8") as f:
         stored = json.load(f).get("repo", {}).get("head", "")
     head = gitinfo.try_run(repo, "rev-parse", "HEAD")
     if stored and head and stored != head:
-        print("stale: atlas at %s, HEAD is %s (run `repo-atlas generate`)"
+        print("stale: knowledge graph at %s, HEAD is %s (run `repokg generate`)"
               % (stored[:12], head[:12]))
         return 1
-    print("fresh: atlas matches HEAD %s" % (head[:12] or "(unknown)"))
+    print("fresh: knowledge graph matches HEAD %s" % (head[:12] or "(unknown)"))
     return 0
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        prog="repo-atlas",
+        prog="repokg",
         description="Generate an AI-ready knowledge graph of a codebase.")
     ap.add_argument("command", nargs="?", default="generate",
                     choices=["scan", "prompts", "render", "generate", "inject",
                              "check", "version"],
-                    help="scan: extract structure to .atlas/atlas.json | "
+                    help="scan: extract structure to .repokg/kg.json | "
                          "prompts: write the AI enrichment prompt | "
-                         "render: atlas.json (+narratives.json) -> ATLAS.md | "
+                         "render: kg.json (+narratives.json) -> KNOWLEDGE_GRAPH.md | "
                          "generate: scan + prompts + render (default) | "
-                         "inject: add atlas pointer to CLAUDE.md/AGENTS.md/cursor rules | "
-                         "check: exit 1 if atlas is stale vs HEAD")
+                         "inject: add knowledge-graph pointer to CLAUDE.md/AGENTS.md/cursor rules | "
+                         "check: exit 1 if knowledge graph is stale vs HEAD")
     ap.add_argument("path", nargs="?", default=".", help="repository path (default: .)")
-    ap.add_argument("--out", default=None, help="output dir (default: <repo>/.atlas)")
-    ap.add_argument("--md", default=None, help="markdown output (default: <repo>/ATLAS.md)")
+    ap.add_argument("--out", default=None, help="output dir (default: <repo>/.repokg)")
+    ap.add_argument("--md", default=None, help="markdown output (default: <repo>/KNOWLEDGE_GRAPH.md)")
     ap.add_argument("--no-github", action="store_true", help="skip gh PR lookup")
     ap.add_argument("--pr-limit", type=int, default=1000, help="max PRs to fetch (default 1000)")
     args = ap.parse_args(argv)
 
     if args.command == "version":
-        print("repo-atlas %s" % __version__)
+        print("repokg %s" % __version__)
         return 0
 
     repo = os.path.abspath(args.path)
     if not os.path.isdir(repo):
         print("error: %s is not a directory" % repo, file=sys.stderr)
         return 2
-    out = args.out or os.path.join(repo, ".atlas")
-    md = args.md or os.path.join(repo, "ATLAS.md")
+    out = args.out or os.path.join(repo, ".repokg")
+    md = args.md or os.path.join(repo, "KNOWLEDGE_GRAPH.md")
 
     try:
         if args.command == "scan":
@@ -135,7 +135,7 @@ def main(argv=None):
         print("error: %s" % e, file=sys.stderr)
         return 1
     except FileNotFoundError as e:
-        print("error: %s (run `repo-atlas scan` first?)" % e, file=sys.stderr)
+        print("error: %s (run `repokg scan` first?)" % e, file=sys.stderr)
         return 1
     return 0
 

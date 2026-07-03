@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "repo-atlas"
+name = "repokg"
 version = "0.2.0"
-description = "Generate an AI-ready knowledge graph (ATLAS.md + atlas.json) of any codebase: modules, dependency edges, branches, PRs, ops surface."
+description = "Generate an AI-ready knowledge graph (KNOWLEDGE_GRAPH.md + kg.json) of any codebase: modules, dependency edges, branches, PRs, ops surface."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Nihar Shah" }]
@@ -21,10 +21,10 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/NehharShah/repo-atlas"
+Homepage = "https://github.com/NehharShah/repokg"
 
 [project.scripts]
-repo-atlas = "repo_atlas.cli:main"
+repokg = "repokg.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

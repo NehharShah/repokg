@@ -1,22 +1,22 @@
 """Emit the enrichment prompt that any AI coding agent can execute."""
 
 PROMPT = """\
-# repo-atlas enrichment task
+# repokg enrichment task
 
-You are an AI coding agent working inside this repository. `repo-atlas` has already
-extracted the deterministic structure of this codebase into `{out}/atlas.json` and
+You are an AI coding agent working inside this repository. `repokg` has already
+extracted the deterministic structure of this codebase into `{out}/kg.json` and
 rendered it as `{md}`. Your job is to add the semantic layer that static analysis
 cannot produce — and to verify every claim by actually reading the code.
 
 ## Steps
 
-1. Read `{out}/atlas.json`. Note the modules (sorted by LOC), the dependency edges,
+1. Read `{out}/kg.json`. Note the modules (sorted by LOC), the dependency edges,
    the branch/PR inventory, and the ops surface.
 2. Explore the code. Prioritize: entry points (main/cli files), the largest
    non-generated modules, README/docs, and config files. For each module in the
    inventory, determine its real purpose from its code — do not guess from its name.
 3. Reconstruct the data flow(s): how does input enter the system, what transforms
-   it, where does it exit? Follow the dependency edges in atlas.json.
+   it, where does it exit? Follow the dependency edges in kg.json.
 4. Reconstruct the project timeline from the PR catalog: group PRs into eras/epics
    with a theme each (e.g. "Feb: FIX adapter built", "May: relayer fleet").
 5. Collect gotchas: non-obvious conventions, footguns, deliberate quirks
@@ -44,8 +44,8 @@ cannot produce — and to verify every claim by actually reading the code.
    (CLAUDE.md / AGENTS.md / Cursor rules) so future agents find it:
 
 ```sh
-repo-atlas render {repo}
-repo-atlas inject {repo}
+repokg render {repo}
+repokg inject {repo}
 ```
 
 ## Quality bar

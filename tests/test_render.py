@@ -1,8 +1,8 @@
 import unittest
 
-from repo_atlas.markdown import aggregate, mermaid_id, render
+from repokg.markdown import aggregate, mermaid_id, render
 
-ATLAS = {
+KG = {
     "generated_at": "2026-07-03",
     "repo": {
         "name": "demo", "remote": "git@github.com:x/demo.git", "trunk": "main",
@@ -51,15 +51,15 @@ class TestRender(unittest.TestCase):
         self.assertEqual(aggregate("a", 2), "a")
 
     def test_render_structure_only(self):
-        doc = render(ATLAS, {})
-        for needle in ("# demo — Codebase Atlas", "## 1. Repo at a glance",
+        doc = render(KG, {})
+        for needle in ("# demo — Codebase Knowledge Graph", "## 1. Repo at a glance",
                        "```mermaid", "src/app", "pending enrichment",
                        "Open PRs", "Appendix A", "bug \\| pipe", "## 7. Timeline",
                        "Agent context files"):
             self.assertIn(needle, doc)
 
     def test_timeline_chronological_despite_pr_number_order(self):
-        doc = render(ATLAS, {})
+        doc = render(KG, {})
         # PR #3 merged 2026-01, PR #1 merged 2026-03: month rows must be sorted by date
         self.assertLess(doc.index("| 2026-01 |"), doc.index("| 2026-03 |"))
 
@@ -69,7 +69,7 @@ class TestRender(unittest.TestCase):
              "flows": [{"name": "Main flow", "steps": ["in", "out"]}],
              "timeline": [{"period": "2026-01", "theme": "built it"}],
              "gotchas": ["watch out"]}
-        doc = render(ATLAS, n)
+        doc = render(KG, n)
         for needle in ("Demo overview.", "The app.", "Main flow",
                        "built it", "watch out"):
             self.assertIn(needle, doc)

@@ -1,6 +1,6 @@
 import unittest
 
-from repo_atlas.github import classify
+from repokg.github import classify
 
 
 def b(name, merged_ancestry=False):

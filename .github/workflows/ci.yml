@@ -20,5 +20,5 @@ jobs:
       - run: python -m unittest discover -s tests -v
       - name: smoke test on this repo
         run: |
-          repo-atlas generate . --no-github
-          test -s ATLAS.md && test -s .atlas/atlas.json
+          repokg generate . --no-github
+          test -s KNOWLEDGE_GRAPH.md && test -s .repokg/kg.json
