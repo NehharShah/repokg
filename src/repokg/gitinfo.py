@@ -47,7 +47,7 @@ def collect(repo):
         })
     names = {b["name"] for b in branches}
 
-    trunk = _detect_trunk(repo, names, use_remote)
+    trunk, trunk_method = _detect_trunk(repo, names, use_remote)
     integration = next((c for c in INTEGRATION_CANDIDATES if c in names and c != trunk), "")
     base = integration or trunk
     base_ref = ("origin/" + base) if (use_remote and base) else base
@@ -94,6 +94,7 @@ def collect(repo):
         "remote": remote,
         "head": try_run(repo, "rev-parse", "HEAD"),
         "trunk": trunk,
+        "trunk_method": trunk_method,
         "integration": integration,
         "default_base": base,
         "first_commit": roots[-1] if roots else "",
@@ -104,17 +105,18 @@ def collect(repo):
 
 
 def _detect_trunk(repo, names, use_remote):
+    """Return (trunk_name, detection_method)."""
     if use_remote:
         head = try_run(repo, "symbolic-ref", "refs/remotes/origin/HEAD")
         if head:
-            return head.rsplit("/", 1)[-1]
+            return head.rsplit("/", 1)[-1], "origin/HEAD symref"
     for cand in ("main", "master"):
         if cand in names:
-            return cand
+            return cand, "well-known name"
     cur = try_run(repo, "rev-parse", "--abbrev-ref", "HEAD")
     if cur and cur != "HEAD":
-        return cur
-    return sorted(names)[0] if names else ""
+        return cur, "current branch"
+    return (sorted(names)[0], "first branch alphabetically") if names else ("", "none")
 
 
 def _repo_name(remote, top):

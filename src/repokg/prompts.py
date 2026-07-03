@@ -21,7 +21,8 @@ cannot produce — and to verify every claim by actually reading the code.
    with a theme each (e.g. "Feb: FIX adapter built", "May: relayer fleet").
 5. Collect gotchas: non-obvious conventions, footguns, deliberate quirks
    (check CLAUDE.md / CONTRIBUTING / lint configs for hints, then verify).
-6. Write your findings to `{out}/narratives.json` with EXACTLY this schema:
+6. Write your findings to `{out}/narratives.json` with EXACTLY this schema
+   (it is validated on render; unknown keys or wrong types fail loudly):
 
 ```json
 {{

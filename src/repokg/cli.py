@@ -1,12 +1,14 @@
-"""repokg CLI: scan | prompts | render | generate."""
+"""repokg CLI: scan | prompts | render | generate | inject | audit | clean | check."""
 
 import argparse
 import datetime
+import difflib
 import json
 import os
 import sys
 
-from . import __version__, code, deps, github, gitinfo, inject, markdown, ops, prompts
+from . import (__version__, code, deps, findings, github, gitinfo, inject,
+               markdown, ops, prompts, validate)
 
 
 def scan(repo, out, no_github, pr_limit):
@@ -30,6 +32,7 @@ def scan(repo, out, no_github, pr_limit):
         "github_note": note,
         "ops": ops.collect(repo, tree),
     }
+    kg["findings"], kg["uncertainty"] = findings.build(kg)
     os.makedirs(out, exist_ok=True)
     path = os.path.join(out, "kg.json")
     with open(path, "w", encoding="utf-8") as f:
@@ -55,17 +58,59 @@ def render(out, md):
     npath = os.path.join(out, "narratives.json")
     if os.path.isfile(npath):
         with open(npath, encoding="utf-8") as f:
-            narratives = json.load(f)
+            try:
+                narratives = json.load(f)
+            except json.JSONDecodeError as e:
+                print("error: %s is not valid JSON: %s" % (npath, e), file=sys.stderr)
+                return 1
+        errs = validate.narratives(narratives)
+        if errs:
+            print("error: %s failed schema validation:" % npath, file=sys.stderr)
+            for e in errs:
+                print("  - %s" % e, file=sys.stderr)
+            print("fix the file (schema in .repokg/prompts/enrich.md) and re-run "
+                  "`repokg render`", file=sys.stderr)
+            return 1
     doc = markdown.render(kg, narratives)
     with open(md, "w", encoding="utf-8") as f:
         f.write(doc)
     state = "enriched" if narratives else "structure-only; run .repokg/prompts/enrich.md to enrich"
     print("wrote %s (%s)" % (md, state))
+    return 0
 
 
-def do_inject(repo, md):
-    for path, status in inject.run(repo, md).items():
-        print("%s: %s" % (path, status))
+def do_inject(repo, md, diff=False):
+    for path, (status, old, new) in inject.run(repo, md, write=not diff).items():
+        print("%s: %s%s" % (path, status, " (dry run)" if diff and status != "unchanged" else ""))
+        if diff and status != "unchanged":
+            sys.stdout.writelines(difflib.unified_diff(
+                old.splitlines(keepends=True), new.splitlines(keepends=True),
+                fromfile="a/" + path, tofile="b/" + path))
+            print()
+
+
+def do_clean(repo, out, md, diff=False):
+    actions = inject.clean(repo, out, md, write=not diff)
+    if not actions:
+        print("nothing to clean")
+        return
+    for path, action in actions.items():
+        print("%s: %s%s" % (path, action,
+                            " (dry run)" if diff and "SKIPPED" not in action else ""))
+
+
+def audit(out, as_json=False):
+    with open(os.path.join(out, "kg.json"), encoding="utf-8") as f:
+        kg = json.load(f)
+    found = kg.get("findings", [])
+    notes = kg.get("uncertainty", [])
+    if not found and not notes:
+        print("no findings recorded (re-run `repokg scan` with repokg >= 0.2)")
+        return
+    if as_json:
+        print(json.dumps({"findings": found, "uncertainty": notes}, indent=1))
+    else:
+        print(findings.render_text(found, notes))
 
 
 def check(repo, out, md):
@@ -91,18 +136,23 @@ def main(argv=None):
         description="Generate an AI-ready knowledge graph of a codebase.")
     ap.add_argument("command", nargs="?", default="generate",
                     choices=["scan", "prompts", "render", "generate", "inject",
-                             "check", "version"],
+                             "audit", "clean", "check", "version"],
                     help="scan: extract structure to .repokg/kg.json | "
                          "prompts: write the AI enrichment prompt | "
                          "render: kg.json (+narratives.json) -> KNOWLEDGE_GRAPH.md | "
                          "generate: scan + prompts + render (default) | "
                          "inject: add knowledge-graph pointer to CLAUDE.md/AGENTS.md/cursor rules | "
+                         "audit: show inferred conclusions with confidence + evidence | "
+                         "clean: remove everything repokg authored | "
                          "check: exit 1 if knowledge graph is stale vs HEAD")
     ap.add_argument("path", nargs="?", default=".", help="repository path (default: .)")
     ap.add_argument("--out", default=None, help="output dir (default: <repo>/.repokg)")
     ap.add_argument("--md", default=None, help="markdown output (default: <repo>/KNOWLEDGE_GRAPH.md)")
     ap.add_argument("--no-github", action="store_true", help="skip gh PR lookup")
     ap.add_argument("--pr-limit", type=int, default=1000, help="max PRs to fetch (default 1000)")
+    ap.add_argument("--diff", action="store_true",
+                    help="inject/clean: dry run, print what would change")
+    ap.add_argument("--json", action="store_true", help="audit: machine-readable output")
     args = ap.parse_args(argv)
 
     if args.command == "version":
@@ -122,15 +172,19 @@ def main(argv=None):
         elif args.command == "prompts":
             write_prompts(repo, out, md)
         elif args.command == "render":
-            render(out, md)
+            return render(out, md)
         elif args.command == "inject":
-            do_inject(repo, md)
+            do_inject(repo, md, diff=args.diff)
+        elif args.command == "audit":
+            audit(out, as_json=args.json)
+        elif args.command == "clean":
+            do_clean(repo, out, md, diff=args.diff)
         elif args.command == "check":
             return check(repo, out, md)
         else:  # generate
             scan(repo, out, args.no_github, args.pr_limit)
             write_prompts(repo, out, md)
-            render(out, md)
+            return render(out, md)
     except RuntimeError as e:
         print("error: %s" % e, file=sys.stderr)
         return 1

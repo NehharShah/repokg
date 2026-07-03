@@ -61,11 +61,30 @@ timeline eras, and gotchas alongside the deterministic structure.
 | `repokg prompts [path]` | Write the enrichment prompt |
 | `repokg render [path]` | `kg.json` (+ `narratives.json`) → `KNOWLEDGE_GRAPH.md` |
 | `repokg generate [path]` | All three (default) |
-| `repokg inject [path]` | Wire the knowledge graph into `CLAUDE.md` / `AGENTS.md` / Cursor rules |
+| `repokg inject [path]` | Wire the knowledge graph into `CLAUDE.md` / `AGENTS.md` / Cursor rules (`--diff` for dry run) |
+| `repokg audit [path]` | Show every *inferred* conclusion with confidence + evidence (`--json` for machines) |
+| `repokg clean [path]` | Remove everything repokg authored — never touches your content (`--diff` for dry run) |
 | `repokg check [path]` | Exit 1 if the knowledge graph is stale vs `HEAD` (CI-friendly) |
 
 Flags: `--out DIR` (default `<repo>/.repokg`), `--md FILE` (default `<repo>/KNOWLEDGE_GRAPH.md`),
-`--no-github`, `--pr-limit N`.
+`--no-github`, `--pr-limit N`, `--diff`, `--json`.
+
+## Honesty layer
+
+Most of the graph is measured fact. The parts that are *heuristics* are labeled
+as findings with confidence and evidence, surfaced by `repokg audit`:
+
+```
+[git]
+  trunk = master          high    detected via origin/HEAD symref
+  integration = staging   medium  matched a well-known integration branch name
+[modules]
+  4 flagged generated     low     path-name heuristic; verify before excluding
+```
+
+Agent-written `narratives.json` is schema-validated before rendering — malformed
+enrichment fails loudly with errors precise enough for the agent to self-correct.
+(Findings/confidence design inspired by [RepoCanon](https://github.com/NehharShah/repocanon).)
 
 ## Agent integration
 

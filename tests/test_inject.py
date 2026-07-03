@@ -19,7 +19,7 @@ class TestInject(unittest.TestCase):
             return f.read()
 
     def test_creates_agents_md_when_nothing_exists(self):
-        results = run(self.repo, self.md)
+        results = {k: v[0] for k, v in run(self.repo, self.md).items()}
         self.assertEqual(results, {"AGENTS.md": "created"})
         text = self._read("AGENTS.md")
         self.assertIn(BEGIN, text)
@@ -30,7 +30,7 @@ class TestInject(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as f:
             f.write("# My project\n\nHand-written rules.\n")
         results = run(self.repo, self.md)
-        self.assertEqual(results["CLAUDE.md"], "updated")
+        self.assertEqual(results["CLAUDE.md"][0], "updated")
         text = self._read("CLAUDE.md")
         self.assertIn("Hand-written rules.", text)
         self.assertIn(BEGIN, text)
@@ -39,7 +39,7 @@ class TestInject(unittest.TestCase):
 
     def test_idempotent(self):
         run(self.repo, self.md)
-        results = run(self.repo, self.md)
+        results = {k: v[0] for k, v in run(self.repo, self.md).items()}
         self.assertEqual(results, {"AGENTS.md": "unchanged"})
         self.assertEqual(self._read("AGENTS.md").count(BEGIN), 1)
         self.assertEqual(self._read("AGENTS.md").count(END), 1)
@@ -57,7 +57,7 @@ class TestInject(unittest.TestCase):
     def test_cursor_rules_dir(self):
         os.makedirs(os.path.join(self.repo, ".cursor", "rules"))
         results = run(self.repo, self.md)
-        self.assertEqual(results[".cursor/rules/repokg.mdc"], "created")
+        self.assertEqual(results[".cursor/rules/repokg.mdc"][0], "created")
         text = self._read(".cursor/rules/repokg.mdc")
         self.assertTrue(text.startswith("---\n"))
         self.assertIn("alwaysApply: true", text)
