@@ -1,5 +1,10 @@
 # repokg
 
+[![CI](https://github.com/NehharShah/repokg/actions/workflows/ci.yml/badge.svg)](https://github.com/NehharShah/repokg/actions/workflows/ci.yml)
+[![PyPI version](https://img.shields.io/pypi/v/repokg.svg)](https://pypi.org/project/repokg/)
+[![Python versions](https://img.shields.io/pypi/pyversions/repokg.svg)](https://pypi.org/project/repokg/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Generate an **AI-ready knowledge graph** of any codebase — so an AI agent (or a new
 developer) can read one file and start building immediately.
 
