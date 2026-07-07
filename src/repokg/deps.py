@@ -1,4 +1,4 @@
-"""Dependency-edge extraction: internal import graphs for Go, Python, JS/TS.
+"""Dependency-edge extraction: internal import graphs for Go, Python, JS/TS, Rust.
 
 Edges are directory -> directory, deduplicated with counts. Only imports that
 resolve inside the repo are kept (external/third-party imports are ignored).
@@ -19,6 +19,15 @@ JS_IMPORT_RE = re.compile(
     r"""(?:from\s+|require\(\s*|import\(\s*|^\s*import\s+)['"](\.{1,2}/[^'"]+)['"]""",
     re.M)
 JS_EXTS = (".ts", ".tsx", ".js", ".jsx", ".mjs")
+# [package] section of a Cargo.toml, up to the next table header.
+CARGO_PACKAGE_RE = re.compile(r"^\[package\]\s*$(.*?)(?=^\[|\Z)", re.M | re.S)
+CARGO_NAME_RE = re.compile(r'^\s*name\s*=\s*"([^"]+)"', re.M)
+# First path segment of a `use` declaration (also `pub use`, `pub(crate) use`).
+RUST_USE_RE = re.compile(
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+(?:::)?([A-Za-z_][A-Za-z0-9_]*)", re.M)
+# Built-in path roots that can never be workspace crates. `crate`/`self`/`super`
+# are intra-crate paths (dir-level resolution is a follow-up PR).
+RUST_SKIP = {"std", "core", "alloc", "crate", "self", "super"}
 
 
 def collect(repo, tree=None):
@@ -34,6 +43,7 @@ def collect(repo, tree=None):
     _go_edges(repo, tree, counter)
     _py_edges(repo, tree, dirs, counter)
     _js_edges(repo, tree, dirs, counter)
+    _rust_edges(repo, tree, counter)
 
     edges = [{"from": f or "(root)", "to": t or "(root)", "lang": lang, "count": n}
              for (f, t, lang), n in counter.items()]
@@ -146,6 +156,45 @@ def _js_edges(repo, tree, dirs, counter):
                 target = _existing_dir(_norm(os.path.join(rel, imp)), dirs)
                 if target is not None and target != rel:
                     counter[(rel, target, "JS/TS")] += 1
+
+
+# -- Rust --------------------------------------------------------------------
+
+def _rust_edges(repo, tree, counter):
+    """Crate-level edges from `use <crate>::...` declarations.
+
+    Crates are discovered from every Cargo.toml carrying a [package] name —
+    workspace members each have their own Cargo.toml, so walking them covers
+    workspaces and single-crate repos without parsing [workspace] members.
+    Cargo crate names use `-`, Rust paths use `_`; names are normalized.
+    Intra-crate `use crate::...` resolution is a follow-up PR.
+    """
+    crates = {}  # normalized crate name -> crate dir
+    for rel, files in tree.items():
+        if "Cargo.toml" not in files:
+            continue
+        pkg = CARGO_PACKAGE_RE.search(_read(repo, rel, "Cargo.toml"))
+        if not pkg:
+            continue  # virtual workspace manifest (no [package])
+        name = CARGO_NAME_RE.search(pkg.group(1))
+        if name:
+            crates[name.group(1).replace("-", "_")] = rel
+    if not crates:
+        return
+    # Longest crate dir owning a given file dir (handles nested crates).
+    crate_dirs = sorted(crates.values(), key=len, reverse=True)
+    for rel, files in tree.items():
+        owner = next((c for c in crate_dirs
+                      if rel == c or c == "" or rel.startswith(c + "/")), None)
+        for f in files:
+            if not f.endswith(".rs"):
+                continue
+            for seg in RUST_USE_RE.findall(_read(repo, rel, f)):
+                if seg in RUST_SKIP:
+                    continue
+                target = crates.get(seg)
+                if target is not None and target != owner and target != rel:
+                    counter[(rel, target, "Rust")] += 1
 
 
 # -- helpers -----------------------------------------------------------------
