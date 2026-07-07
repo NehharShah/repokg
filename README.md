@@ -115,7 +115,7 @@ on the knowledge graph discovers your rules — and vice versa.
 | Branch classification | `git for-each-ref` + `--merged` ancestry vs the integration branch (auto-detects `staging`/`develop`), cross-referenced with every PR's head ref via `gh` — distinguishes true merges from squash-merges from abandoned work |
 | PR catalog | `gh pr list --state all` — open / merged / closed-unmerged, full appendix table |
 | Module inventory | Filesystem walk with LOC per directory, language detection, generated-code flagging |
-| Import graph | Go: `import` blocks resolved against `go.mod` module paths · Python: stdlib `ast` incl. relative imports · JS/TS: relative `import`/`require` resolution. Directory→directory edges with counts |
+| Import graph | Go: `import` blocks resolved against `go.mod` module paths · Python: stdlib `ast` incl. relative imports · JS/TS: relative `import`/`require` resolution · Rust: `use` declarations resolved against Cargo crate names (cross-crate) and `src/` module trees (intra-crate). Directory→directory edges with counts |
 | Ops surface | CI workflow names, Dockerfiles, compose files, Helm charts, Makefile targets, config/docs/test/migration dirs |
 | Timeline | Merged PRs grouped by month with conventional-commit scope frequencies (replaced by agent-written eras after enrichment) |
 
@@ -135,12 +135,16 @@ schema — everything else stays deterministic and reproducible.
   linked to it (GitHub's API reports bare head refs).
 - **Python**: packages are discovered at the repo root and under `src/`;
   deeper monorepo layouts (`packages/*/src/…`) get file-level edges only.
+- **Rust**: `use` declarations only — macro-generated imports, re-export
+  chains, and `[dependencies] path = …` (non-workspace) crates are not
+  resolved; `crate::` paths ground only in module dirs/files that exist.
 - Branch `ahead` counts use one batched git call on git ≥ 2.41, with a
   per-branch fallback on older git.
 
 ## Roadmap
 
-- [ ] Rust / Java / Kotlin import graphs
+- [x] Rust import graph
+- [ ] Java / Kotlin import graphs
 - [ ] `--exclude` glob patterns
 - [ ] `llms.txt` emission alongside KNOWLEDGE_GRAPH.md
 - [ ] tsconfig `paths` alias resolution

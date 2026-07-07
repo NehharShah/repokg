@@ -20,6 +20,9 @@ _EDGE_METHODS = {
                        "root and src/ only"),
     "JS/TS": ("medium", "regex over relative imports only; aliases and "
                         "tsconfig paths are not resolved"),
+    "Rust": ("medium", "regex `use` parsing resolved against Cargo [package] "
+                       "names and src/ module dirs; macros, re-exports and "
+                       "path-dependencies are not resolved"),
 }
 
 
