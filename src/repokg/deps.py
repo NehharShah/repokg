@@ -25,8 +25,13 @@ CARGO_NAME_RE = re.compile(r'^\s*name\s*=\s*"([^"]+)"', re.M)
 # First path segment of a `use` declaration (also `pub use`, `pub(crate) use`).
 RUST_USE_RE = re.compile(
     r"^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+(?:::)?([A-Za-z_][A-Za-z0-9_]*)", re.M)
-# Built-in path roots that can never be workspace crates. `crate`/`self`/`super`
-# are intra-crate paths (dir-level resolution is a follow-up PR).
+# Full `use` path with an optional one-level brace group:
+# `use crate::a::b;` / `use crate::{a::b, c};` -> ("crate::a::b", None) / ("crate::", "a::b, c")
+RUST_USE_PATH_RE = re.compile(
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+(?:::)?([A-Za-z_][\w:]*)(?:\{([^}]*)\})?",
+    re.M)
+# Built-in path roots that can never be workspace crates. `self`/`super` are
+# relative module paths; `crate::` paths are resolved dir-level below.
 RUST_SKIP = {"std", "core", "alloc", "crate", "self", "super"}
 
 
@@ -167,7 +172,8 @@ def _rust_edges(repo, tree, counter):
     workspace members each have their own Cargo.toml, so walking them covers
     workspaces and single-crate repos without parsing [workspace] members.
     Cargo crate names use `-`, Rust paths use `_`; names are normalized.
-    Intra-crate `use crate::...` resolution is a follow-up PR.
+    `use crate::...` paths additionally resolve dir-level inside the owning
+    crate's src/ tree (module dirs and `mod.rs`-style file modules).
     """
     crates = {}  # normalized crate name -> crate dir
     for rel, files in tree.items():
@@ -189,12 +195,58 @@ def _rust_edges(repo, tree, counter):
         for f in files:
             if not f.endswith(".rs"):
                 continue
-            for seg in RUST_USE_RE.findall(_read(repo, rel, f)):
+            src = _read(repo, rel, f)
+            for seg in RUST_USE_RE.findall(src):
                 if seg in RUST_SKIP:
                     continue
                 target = crates.get(seg)
                 if target is not None and target != owner and target != rel:
                     counter[(rel, target, "Rust")] += 1
+            if owner is not None:
+                _rust_crate_paths(rel, owner, src, tree, counter)
+
+
+def _rust_crate_paths(rel, owner, src, tree, counter):
+    """Dir-level edges for `use crate::...` inside the owning crate's src/ tree.
+
+    Only files under <crate>/src use `crate::` to mean the lib/bin root —
+    files under tests/ or benches/ are their own crates, where `crate::`
+    refers to themselves, so they are skipped for accuracy.
+    """
+    src_root = _norm(os.path.join(owner, "src"))
+    if src_root not in tree:
+        return
+    if rel != src_root and not rel.startswith(src_root + "/"):
+        return
+    for path, group in RUST_USE_PATH_RE.findall(src):
+        segments = [s for s in path.split("::") if s]
+        if not segments or segments[0] != "crate":
+            continue
+        # Expand a one-level brace group into one path per item.
+        if group:
+            paths = [segments[1:] + [s for s in item.strip().split("::") if s]
+                     for item in group.split(",") if item.strip()]
+        else:
+            paths = [segments[1:]]
+        for segs in paths:
+            target = _rust_resolve(src_root, segs, tree)
+            if target is not None and target != rel:
+                counter[(rel, target, "Rust")] += 1
+
+
+def _rust_resolve(src_root, segments, tree):
+    """Walk path segments as directories under src/; a segment that exists as
+    `<seg>.rs` (file module) resolves to the directory holding it."""
+    target = src_root
+    for seg in segments:
+        nxt = _norm(os.path.join(target, seg))
+        if nxt in tree:
+            target = nxt
+        else:
+            if seg + ".rs" not in tree.get(target, ()):
+                return None  # not a module path we can ground in the tree
+            break
+    return target
 
 
 # -- helpers -----------------------------------------------------------------
