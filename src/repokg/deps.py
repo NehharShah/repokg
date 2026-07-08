@@ -33,6 +33,11 @@ RUST_USE_PATH_RE = re.compile(
 # Built-in path roots that can never be workspace crates. `self`/`super` are
 # relative module paths; `crate::` paths are resolved dir-level below.
 RUST_SKIP = {"std", "core", "alloc", "crate", "self", "super"}
+# JVM: a Maven/Gradle module is any dir carrying its own build file.
+JVM_BUILD_FILES = ("pom.xml", "build.gradle", "build.gradle.kts")
+# `package a.b.c;` (Java) / `package a.b.c` (Kotlin, no semicolon).
+JVM_PACKAGE_RE = re.compile(r"^\s*package\s+([A-Za-z_][\w.]*)\s*;?\s*$", re.M)
+JVM_EXTS = (".java", ".kt")
 
 
 def collect(repo, tree=None):
@@ -247,6 +252,35 @@ def _rust_resolve(src_root, segments, tree):
                 return None  # not a module path we can ground in the tree
             break
     return target
+
+
+# -- Java / Kotlin -----------------------------------------------------------
+
+def _jvm_modules(tree):
+    """Dirs that are Maven/Gradle modules (each submodule carries its own
+    build file, so no settings.gradle / <modules> parsing is needed)."""
+    return sorted(rel for rel, files in tree.items()
+                  if any(b in files for b in JVM_BUILD_FILES))
+
+
+def _jvm_package_index(repo, tree):
+    """{package name -> set of dirs declaring it}, from `package` declarations.
+
+    Declarations are language-level ground truth: they work for standard
+    src/main/java layouts, Kotlin's collapsed directory convention, and plain
+    src/ repos with no build files at all. Imports (follow-up PR) resolve
+    against this index by longest package prefix, which makes external
+    imports (java.*, kotlin.*, third-party) drop out naturally.
+    """
+    index = {}
+    for rel, files in tree.items():
+        for f in files:
+            if not f.endswith(JVM_EXTS):
+                continue
+            m = JVM_PACKAGE_RE.search(_read(repo, rel, f))
+            if m:
+                index.setdefault(m.group(1), set()).add(rel)
+    return index
 
 
 # -- helpers -----------------------------------------------------------------
