@@ -23,6 +23,12 @@ _EDGE_METHODS = {
     "Rust": ("medium", "regex `use` parsing resolved against Cargo [package] "
                        "names and src/ module dirs; macros, re-exports and "
                        "path-dependencies are not resolved"),
+    "Java": ("high", "imports resolved by longest prefix against package "
+                     "declarations (language ground truth); test source roots "
+                     "excluded as targets when a main root declares the package"),
+    "Kotlin": ("high", "same package-declaration resolution as Java, incl. "
+                       "Kotlin's collapsed directory convention; `as` aliases "
+                       "handled, extension-function call sites are not imports"),
 }
 
 
