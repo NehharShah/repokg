@@ -57,7 +57,9 @@ class TestFindings(unittest.TestCase):
             ],
             "edges": [{"from": "a", "to": "b", "lang": "JS/TS", "count": 1},
                       {"from": "a", "to": "b", "lang": "Go", "count": 2},
-                      {"from": "a", "to": "c", "lang": "Rust", "count": 1}],
+                      {"from": "a", "to": "c", "lang": "Rust", "count": 1},
+                      {"from": "a", "to": "d", "lang": "Java", "count": 1},
+                      {"from": "a", "to": "d", "lang": "Kotlin", "count": 1}],
             "modules": [{"path": "gen/pb", "generated": True}],
             "prs": [{"number": 1}],
             "github_note": "",
@@ -71,6 +73,8 @@ class TestFindings(unittest.TestCase):
         self.assertEqual(confs["1 Go edges"], "high")
         self.assertEqual(confs["1 JS/TS edges"], "medium")
         self.assertEqual(confs["1 Rust edges"], "medium")
+        self.assertEqual(confs["1 Java edges"], "high")
+        self.assertEqual(confs["1 Kotlin edges"], "high")
         self.assertEqual(confs["1 modules flagged generated"], "low")
         self.assertTrue(any("Fork PRs" in n for n in notes))
         text = render_text(found, notes)
