@@ -37,6 +37,9 @@ RUST_SKIP = {"std", "core", "alloc", "crate", "self", "super"}
 JVM_BUILD_FILES = ("pom.xml", "build.gradle", "build.gradle.kts")
 # `package a.b.c;` (Java) / `package a.b.c` (Kotlin, no semicolon).
 JVM_PACKAGE_RE = re.compile(r"^\s*package\s+([A-Za-z_][\w.]*)\s*;?\s*$", re.M)
+# `import a.b.C;` / `import static a.b.C.m;` / `import a.b.*;` (captured with a
+# trailing dot, stripped in code) / Kotlin `import a.b.C as D`.
+JVM_IMPORT_RE = re.compile(r"^\s*import\s+(?:static\s+)?([A-Za-z_][\w.]*)", re.M)
 JVM_EXTS = (".java", ".kt")
 
 
@@ -54,6 +57,7 @@ def collect(repo, tree=None):
     _py_edges(repo, tree, dirs, counter)
     _js_edges(repo, tree, dirs, counter)
     _rust_edges(repo, tree, counter)
+    _jvm_edges(repo, tree, counter)
 
     edges = [{"from": f or "(root)", "to": t or "(root)", "lang": lang, "count": n}
              for (f, t, lang), n in counter.items()]
@@ -261,6 +265,49 @@ def _jvm_modules(tree):
     build file, so no settings.gradle / <modules> parsing is needed)."""
     return sorted(rel for rel, files in tree.items()
                   if any(b in files for b in JVM_BUILD_FILES))
+
+
+def _jvm_edges(repo, tree, counter):
+    """Java/Kotlin edges: imports resolved against the package-declaration
+    index by longest package prefix. Externals (java.*, kotlin.*, third-party)
+    are never in the index, so they drop out naturally."""
+    index = _jvm_package_index(repo, tree)
+    if not index:
+        return
+    for rel, files in tree.items():
+        for f in files:
+            if not f.endswith(JVM_EXTS):
+                continue
+            lang = "Kotlin" if f.endswith(".kt") else "Java"
+            for path in JVM_IMPORT_RE.findall(_read(repo, rel, f)):
+                dirs = _jvm_resolve(path.rstrip("."), index)
+                for target in _jvm_prefer_main(dirs):
+                    if target != rel:
+                        counter[(rel, target, lang)] += 1
+
+
+def _jvm_resolve(path, index):
+    """Longest package prefix of an import path present in the index.
+
+    Full path first (wildcard imports name the package itself), then
+    successively dropping trailing segments (class name, nested classes)."""
+    parts = path.split(".")
+    for i in range(len(parts), 0, -1):
+        dirs = index.get(".".join(parts[:i]))
+        if dirs:
+            return dirs
+    return ()
+
+
+def _jvm_prefer_main(dirs):
+    """A package usually exists in both main and test source roots; edges
+    into test dirs from an import would be fabricated, so prefer non-test
+    dirs when the package is declared in several places."""
+    if len(dirs) <= 1:
+        return sorted(dirs)
+    main = [d for d in dirs
+            if not {"test", "tests"} & set(d.split("/"))]
+    return sorted(main) or sorted(dirs)
 
 
 def _jvm_package_index(repo, tree):
