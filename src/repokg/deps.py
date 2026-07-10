@@ -5,6 +5,7 @@ resolve inside the repo are kept (external/third-party imports are ignored).
 """
 
 import ast
+import json
 import os
 import re
 from collections import Counter
@@ -16,9 +17,12 @@ GO_SINGLE_RE = re.compile(r'^import\s+(?:\w+\s+)?"([^"]+)"', re.M)
 GO_QUOTED_RE = re.compile(r'"([^"]+)"')
 GO_MODULE_RE = re.compile(r"^module\s+(\S+)", re.M)
 JS_IMPORT_RE = re.compile(
-    r"""(?:from\s+|require\(\s*|import\(\s*|^\s*import\s+)['"](\.{1,2}/[^'"]+)['"]""",
+    r"""(?:from\s+|require\(\s*|import\(\s*|^\s*import\s+)['"]([^'"]+)['"]""",
     re.M)
 JS_EXTS = (".ts", ".tsx", ".js", ".jsx", ".mjs")
+# tsconfig wins over jsconfig when a dir carries both (jsconfig is the
+# JS-only subset of the same format).
+JS_CONFIG_FILES = ("tsconfig.json", "jsconfig.json")
 # [package] section of a Cargo.toml, up to the next table header.
 CARGO_PACKAGE_RE = re.compile(r"^\[package\]\s*$(.*?)(?=^\[|\Z)", re.M | re.S)
 CARGO_NAME_RE = re.compile(r'^\s*name\s*=\s*"([^"]+)"', re.M)
@@ -162,14 +166,152 @@ def _py_edge(rel, module, level, pkg_map, dirs, counter):
 # -- JS / TS -----------------------------------------------------------------
 
 def _js_edges(repo, tree, dirs, counter):
+    """Relative imports resolve directly; non-relative specifiers go through
+    the nearest tsconfig/jsconfig's `paths` aliases and `baseUrl` (bare
+    third-party imports match nothing there and drop out)."""
+    configs = _js_configs(repo, tree)
     for rel, files in tree.items():
+        cfg = _owning_root(rel, configs) if configs else None
         for f in files:
             if not f.endswith(JS_EXTS) or f.endswith(".d.ts"):
                 continue
             for imp in JS_IMPORT_RE.findall(_read(repo, rel, f)):
-                target = _existing_dir(_norm(os.path.join(rel, imp)), dirs)
+                if imp.startswith("."):
+                    target = _existing_dir(_norm(os.path.join(rel, imp)), dirs)
+                elif cfg is not None and not imp.startswith("/"):
+                    target = _js_alias_resolve(imp, configs[cfg], dirs)
+                else:
+                    target = None
                 if target is not None and target != rel:
                     counter[(rel, target, "JS/TS")] += 1
+
+
+def _js_configs(repo, tree):
+    """{config dir: (paths_base, patterns, bare_base)} from tsconfig/jsconfig.
+
+    paths_base: dir that `paths` values resolve against — baseUrl when set,
+    else the config's own dir (TS 4.4 semantics). patterns: (pattern, values)
+    sorted most-specific-first (longest literal prefix before `*`), matching
+    tsconfig's own tie-break. bare_base: baseUrl dir when explicitly set —
+    bare specifiers additionally resolve against it, after `paths`.
+    Configs defining neither baseUrl nor paths are skipped so an
+    extends-only leaf config does not shadow the root's aliases
+    (`extends` chains themselves are not followed).
+    """
+    configs = {}
+    for rel, files in tree.items():
+        name = next((c for c in JS_CONFIG_FILES if c in files), None)
+        if name is None:
+            continue
+        data = _jsonc_loads(_read(repo, rel, name))
+        opts = data.get("compilerOptions") if isinstance(data, dict) else None
+        if not isinstance(opts, dict):
+            continue
+        base = opts.get("baseUrl")
+        bare_base = _norm(os.path.join(rel, base)) if isinstance(base, str) else None
+        patterns = []
+        paths = opts.get("paths")
+        if isinstance(paths, dict):
+            for pat, vals in paths.items():
+                if not isinstance(pat, str) or not isinstance(vals, list):
+                    continue
+                vals = [v for v in vals if isinstance(v, str)]
+                if vals:
+                    patterns.append((pat, vals))
+        patterns.sort(  # exact patterns beat wildcards; longer prefix wins
+            key=lambda pv: ("*" in pv[0], -pv[0].find("*"), pv[0]))
+        if bare_base is None and not patterns:
+            continue
+        configs[rel] = (bare_base if bare_base is not None else rel,
+                        patterns, bare_base)
+    return configs
+
+
+def _js_alias_resolve(imp, cfg, dirs):
+    """Resolve a non-relative specifier through `paths` patterns (first
+    existing substitution wins), then baseUrl-relative lookup; None when
+    nothing grounds in the repo tree."""
+    paths_base, patterns, bare_base = cfg
+    for pat, vals in patterns:
+        star = pat.find("*")
+        if star == -1:
+            if imp != pat:
+                continue
+            stem = ""
+        else:
+            pre, suf = pat[:star], pat[star + 1:]
+            if not (len(imp) >= len(pre) + len(suf)
+                    and imp.startswith(pre) and imp.endswith(suf)):
+                continue
+            stem = imp[len(pre):len(imp) - len(suf)]
+        for val in vals:
+            target = _existing_dir(
+                _norm(os.path.join(paths_base, val.replace("*", stem, 1))),
+                dirs)
+            if target is not None:
+                return target
+    if bare_base is not None:
+        return _existing_dir(_norm(os.path.join(bare_base, imp)), dirs)
+    return None
+
+
+def _jsonc_loads(text):
+    """json.loads for the JSONC dialect tsconfig uses: // and /* */ comments
+    and trailing commas are stripped (string-aware, so comment-lookalikes
+    inside string values survive). Returns None when still not valid JSON."""
+    out, i, n = [], 0, len(text)
+    while i < n:  # pass 1: strip comments
+        c = text[i]
+        if c == '"':
+            j = _jsonc_string_end(text, i)
+            out.append(text[i:j])
+            i = j
+        elif text[i:i + 2] == "//":
+            while i < n and text[i] != "\n":
+                i += 1
+        elif text[i:i + 2] == "/*":
+            end = text.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+        else:
+            out.append(c)
+            i += 1
+    text = "".join(out)
+    out, i, n = [], 0, len(text)
+    while i < n:  # pass 2: drop trailing commas
+        c = text[i]
+        if c == '"':
+            j = _jsonc_string_end(text, i)
+            out.append(text[i:j])
+            i = j
+        elif c == ",":
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            if j < n and text[j] in "}]":
+                i += 1  # trailing comma: skip it
+            else:
+                out.append(c)
+                i += 1
+        else:
+            out.append(c)
+            i += 1
+    try:
+        return json.loads("".join(out))
+    except ValueError:
+        return None
+
+
+def _jsonc_string_end(text, i):
+    """Index just past the string literal opening at text[i]."""
+    j, n = i + 1, len(text)
+    while j < n:
+        if text[j] == "\\":
+            j += 2
+        elif text[j] == '"':
+            return j + 1
+        else:
+            j += 1
+    return n
 
 
 # -- Rust --------------------------------------------------------------------
