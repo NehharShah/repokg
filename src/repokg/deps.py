@@ -51,19 +51,24 @@ JVM_IMPORT_RE = re.compile(r"^\s*import\s+(?:static\s+)?([A-Za-z_][\w.]*)", re.M
 JVM_EXTS = (".java", ".kt")
 
 
-def collect(repo, tree=None):
+def collect(repo, tree=None, stats=None):
     """Return [{"from": dir, "to": dir, "lang": lang, "count": n}] sorted by count.
 
     tree: optional pre-built {rel_dir: filenames} to avoid re-walking the repo.
+    stats: optional dict populated with extraction statistics —
+    js_alias_unresolved: imports that matched a tsconfig/jsconfig paths
+    pattern but whose targets exist nowhere in the tree (dropped edges).
     """
     counter = Counter()
     if tree is None:
         tree = {rel: files for rel, files in walk(repo)}
+    if stats is None:
+        stats = {}
     dirs = set(tree)
 
     _go_edges(repo, tree, counter)
     _py_edges(repo, tree, dirs, counter)
-    _js_edges(repo, tree, dirs, counter)
+    _js_edges(repo, tree, dirs, counter, stats)
     _rust_edges(repo, tree, counter)
     _jvm_edges(repo, tree, counter)
 
@@ -169,11 +174,13 @@ def _py_edge(rel, module, level, pkg_map, dirs, counter):
 
 # -- JS / TS -----------------------------------------------------------------
 
-def _js_edges(repo, tree, dirs, counter):
+def _js_edges(repo, tree, dirs, counter, stats):
     """Relative imports resolve directly; non-relative specifiers go through
     the nearest tsconfig/jsconfig's `paths` aliases and `baseUrl`, then
     workspace package names (bare third-party imports match nothing in
-    either and drop out)."""
+    either and drop out). Alias imports whose pattern matched but whose
+    targets ground nowhere are counted in stats — that is silent coverage
+    loss otherwise."""
     configs = _js_configs(repo, tree)
     workspaces = _js_workspaces(repo, tree)
     for rel, files in tree.items():
@@ -187,10 +194,14 @@ def _js_edges(repo, tree, dirs, counter):
                 elif imp.startswith("/"):
                     target = None
                 else:
-                    target = (_js_alias_resolve(imp, configs[cfg], dirs)
-                              if cfg is not None else None)
+                    target, matched = (
+                        _js_alias_resolve(imp, configs[cfg], dirs)
+                        if cfg is not None else (None, False))
                     if target is None and workspaces:
                         target = _js_workspace_resolve(imp, workspaces, dirs)
+                    if target is None and matched:
+                        stats["js_alias_unresolved"] = \
+                            stats.get("js_alias_unresolved", 0) + 1
                 if target is not None and target != rel:
                     counter[(rel, target, "JS/TS")] += 1
 
@@ -238,9 +249,12 @@ def _js_configs(repo, tree):
 
 def _js_alias_resolve(imp, cfg, dirs):
     """Resolve a non-relative specifier through `paths` patterns (first
-    existing substitution wins), then baseUrl-relative lookup; None when
-    nothing grounds in the repo tree."""
+    existing substitution wins), then baseUrl-relative lookup.
+
+    Returns (target dir or None, whether a paths pattern matched) — a match
+    with no grounded target is disclosed as an uncertainty note upstream."""
     paths_base, patterns, bare_base = cfg
+    matched = False
     for pat, vals in patterns:
         star = pat.find("*")
         if star == -1:
@@ -253,20 +267,21 @@ def _js_alias_resolve(imp, cfg, dirs):
                     and imp.startswith(pre) and imp.endswith(suf)):
                 continue
             stem = imp[len(pre):len(imp) - len(suf)]
+        matched = True
         for val in vals:
             target = _existing_dir(
                 _norm(os.path.join(paths_base, val.replace("*", stem, 1))),
                 dirs)
             if target is not None:
-                return target
+                return target, True
     if bare_base is not None:
         target = _existing_dir(_norm(os.path.join(bare_base, imp)), dirs)
         # _existing_dir's parent fallback would resolve any bare specifier
         # whose first segment is missing ('react', 'lodash') to bare_base
         # itself — those are third-party packages, not internal edges.
         if target is not None and target != bare_base:
-            return target
-    return None
+            return target, matched
+    return None, matched
 
 
 def _js_workspaces(repo, tree):
