@@ -5,6 +5,7 @@ resolve inside the repo are kept (external/third-party imports are ignored).
 """
 
 import ast
+import fnmatch
 import json
 import os
 import re
@@ -23,6 +24,9 @@ JS_EXTS = (".ts", ".tsx", ".js", ".jsx", ".mjs")
 # tsconfig wins over jsconfig when a dir carries both (jsconfig is the
 # JS-only subset of the same format).
 JS_CONFIG_FILES = ("tsconfig.json", "jsconfig.json")
+# `- 'packages/*'` list item under the packages: key of pnpm-workspace.yaml
+# (flat list of quoted-or-bare globs; a full YAML parser is not needed).
+PNPM_ITEM_RE = re.compile(r"^\s*-\s*['\"]?([^'\"#\n]+?)['\"]?\s*$")
 # [package] section of a Cargo.toml, up to the next table header.
 CARGO_PACKAGE_RE = re.compile(r"^\[package\]\s*$(.*?)(?=^\[|\Z)", re.M | re.S)
 CARGO_NAME_RE = re.compile(r'^\s*name\s*=\s*"([^"]+)"', re.M)
@@ -167,9 +171,11 @@ def _py_edge(rel, module, level, pkg_map, dirs, counter):
 
 def _js_edges(repo, tree, dirs, counter):
     """Relative imports resolve directly; non-relative specifiers go through
-    the nearest tsconfig/jsconfig's `paths` aliases and `baseUrl` (bare
-    third-party imports match nothing there and drop out)."""
+    the nearest tsconfig/jsconfig's `paths` aliases and `baseUrl`, then
+    workspace package names (bare third-party imports match nothing in
+    either and drop out)."""
     configs = _js_configs(repo, tree)
+    workspaces = _js_workspaces(repo, tree)
     for rel, files in tree.items():
         cfg = _owning_root(rel, configs) if configs else None
         for f in files:
@@ -178,10 +184,13 @@ def _js_edges(repo, tree, dirs, counter):
             for imp in JS_IMPORT_RE.findall(_read(repo, rel, f)):
                 if imp.startswith("."):
                     target = _existing_dir(_norm(os.path.join(rel, imp)), dirs)
-                elif cfg is not None and not imp.startswith("/"):
-                    target = _js_alias_resolve(imp, configs[cfg], dirs)
-                else:
+                elif imp.startswith("/"):
                     target = None
+                else:
+                    target = (_js_alias_resolve(imp, configs[cfg], dirs)
+                              if cfg is not None else None)
+                    if target is None and workspaces:
+                        target = _js_workspace_resolve(imp, workspaces, dirs)
                 if target is not None and target != rel:
                     counter[(rel, target, "JS/TS")] += 1
 
@@ -257,6 +266,85 @@ def _js_alias_resolve(imp, cfg, dirs):
         # itself — those are third-party packages, not internal edges.
         if target is not None and target != bare_base:
             return target
+    return None
+
+
+def _js_workspaces(repo, tree):
+    """{package name: workspace dir} for monorepo workspaces.
+
+    Globs come from package.json `workspaces` (npm/yarn; array or
+    {packages: [...]}) and pnpm-workspace.yaml `packages:` lists — any dir
+    may declare them, so nested workspace roots work too. A matched dir
+    counts only if its own package.json carries a `name`; that name is what
+    `import '@scope/pkg'` specifiers resolve against.
+    """
+    names = {}
+    for rel, files in tree.items():
+        globs = []
+        if "package.json" in files:
+            data = _jsonc_loads(_read(repo, rel, "package.json"))
+            ws = data.get("workspaces") if isinstance(data, dict) else None
+            if isinstance(ws, dict):
+                ws = ws.get("packages")
+            if isinstance(ws, list):
+                globs.extend(g for g in ws if isinstance(g, str))
+        if "pnpm-workspace.yaml" in files:
+            globs.extend(_pnpm_globs(_read(repo, rel, "pnpm-workspace.yaml")))
+        for g in globs:
+            if g.startswith("!"):  # negation globs: rare, not modeled
+                continue
+            pat = _norm(os.path.join(rel, g)).split("/")
+            for wdir, wfiles in tree.items():
+                if not wdir or "package.json" not in wfiles:
+                    continue
+                if not _segments_match(pat, wdir.split("/")):
+                    continue
+                pkg = _jsonc_loads(_read(repo, wdir, "package.json"))
+                name = pkg.get("name") if isinstance(pkg, dict) else None
+                if isinstance(name, str) and name:
+                    names[name] = wdir
+    return names
+
+
+def _pnpm_globs(text):
+    """Glob items of the top-level packages: list in pnpm-workspace.yaml."""
+    globs, in_packages = [], False
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line[0].isspace() and line[0] != "-":
+            in_packages = line.split(":")[0].strip() == "packages"
+            continue
+        if in_packages:
+            m = PNPM_ITEM_RE.match(line)
+            if m:
+                globs.append(m.group(1))
+    return globs
+
+
+def _segments_match(pat, segs):
+    """Segment-wise glob match: `*` spans one path segment (unlike fnmatch
+    on the whole string), `**` spans any number."""
+    if not pat:
+        return not segs
+    if pat[0] == "**":
+        return any(_segments_match(pat[1:], segs[i:])
+                   for i in range(len(segs) + 1))
+    return (bool(segs) and fnmatch.fnmatchcase(segs[0], pat[0])
+            and _segments_match(pat[1:], segs[1:]))
+
+
+def _js_workspace_resolve(imp, workspaces, dirs):
+    """Workspace package name -> its dir; a subpath import grounds inside
+    the package dir when it exists there, else falls back to the dir itself
+    (real subpaths map through package `exports`, which is not modeled)."""
+    for name, wdir in workspaces.items():
+        if imp == name:
+            return wdir
+        if imp.startswith(name + "/"):
+            sub = imp[len(name) + 1:]
+            target = _existing_dir(_norm(os.path.join(wdir, sub)), dirs)
+            return target if target is not None else wdir
     return None
 
 
