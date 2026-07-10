@@ -3,7 +3,7 @@ import tempfile
 import unittest
 
 from repokg.code import walk
-from repokg.deps import _js_configs, _jsonc_loads, collect
+from repokg.deps import _js_configs, _js_workspaces, _jsonc_loads, _pnpm_globs, collect
 
 
 def write(root, rel, text):
@@ -203,6 +203,183 @@ class TestJsAliasEdges(unittest.TestCase):
         write(self.repo, "src/a.ts", "export const a = 1\n")
         write(self.repo, "app/main.ts", "import { a } from '@/a'\n")
         self.assertEqual(self.edges(), {("app", "src"): 1})
+
+
+class TestJsWorkspaces(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def tree(self):
+        return dict(walk(self.repo))
+
+    def test_npm_array_and_scoped_names(self):
+        write(self.repo, "package.json",
+              '{"name": "root", "workspaces": ["packages/*"]}')
+        write(self.repo, "packages/core/package.json",
+              '{"name": "@acme/core"}')
+        write(self.repo, "packages/ui/package.json",
+              '{"name": "@acme/ui"}')
+        self.assertEqual(_js_workspaces(self.repo, self.tree()),
+                         {"@acme/core": "packages/core",
+                          "@acme/ui": "packages/ui"})
+
+    def test_yarn_object_form(self):
+        write(self.repo, "package.json",
+              '{"workspaces": {"packages": ["libs/*"], "nohoist": ["**"]}}')
+        write(self.repo, "libs/log/package.json", '{"name": "log"}')
+        self.assertEqual(_js_workspaces(self.repo, self.tree()),
+                         {"log": "libs/log"})
+
+    def test_pnpm_workspace_yaml(self):
+        write(self.repo, "pnpm-workspace.yaml",
+              "# workspace layout\n"
+              "packages:\n"
+              "  - 'packages/*'\n"
+              '  - "apps/*"\n'
+              "  - tools\n"
+              "catalog:\n"
+              "  - not-a-glob\n")
+        write(self.repo, "packages/core/package.json", '{"name": "@acme/core"}')
+        write(self.repo, "apps/web/package.json", '{"name": "web"}')
+        write(self.repo, "tools/package.json", '{"name": "tools"}')
+        self.assertEqual(_js_workspaces(self.repo, self.tree()),
+                         {"@acme/core": "packages/core", "web": "apps/web",
+                          "tools": "tools"})
+
+    def test_pnpm_globs_parser(self):
+        self.assertEqual(
+            _pnpm_globs("packages:\n  - 'a/*'\n  - b\nother:\n  - c\n"),
+            ["a/*", "b"])
+        self.assertEqual(_pnpm_globs("onlyOther:\n  - c\n"), [])
+
+    def test_star_glob_does_not_cross_segments(self):
+        write(self.repo, "package.json", '{"workspaces": ["packages/*"]}')
+        write(self.repo, "packages/core/package.json", '{"name": "core"}')
+        write(self.repo, "packages/core/examples/demo/package.json",
+              '{"name": "demo"}')
+        self.assertEqual(_js_workspaces(self.repo, self.tree()),
+                         {"core": "packages/core"})
+
+    def test_double_star_glob_crosses_segments(self):
+        write(self.repo, "package.json", '{"workspaces": ["libs/**"]}')
+        write(self.repo, "libs/a/deep/pkg/package.json", '{"name": "deep"}')
+        self.assertEqual(_js_workspaces(self.repo, self.tree()),
+                         {"deep": "libs/a/deep/pkg"})
+
+    def test_workspace_without_name_ignored(self):
+        write(self.repo, "package.json", '{"workspaces": ["packages/*"]}')
+        write(self.repo, "packages/anon/package.json", '{"private": true}')
+        self.assertEqual(_js_workspaces(self.repo, self.tree()), {})
+
+
+class TestJsWorkspaceEdges(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = self.tmp.name
+        write(self.repo, "package.json", '{"workspaces": ["packages/*"]}')
+        write(self.repo, "packages/core/package.json", '{"name": "@acme/core"}')
+        write(self.repo, "packages/core/src/index.ts", "export const c = 1\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def edges(self):
+        return {(e["from"], e["to"]): e["count"]
+                for e in collect(self.repo) if e["lang"] == "JS/TS"}
+
+    def test_workspace_name_import(self):
+        write(self.repo, "packages/app/package.json", '{"name": "@acme/app"}')
+        write(self.repo, "packages/app/main.ts",
+              "import { c } from '@acme/core'\n"
+              "import React from 'react'\n")
+        self.assertEqual(self.edges(),
+                         {("packages/app", "packages/core"): 1})
+
+    def test_workspace_subpath_grounds_or_falls_back(self):
+        write(self.repo, "packages/app/package.json", '{"name": "@acme/app"}')
+        write(self.repo, "packages/app/main.ts",
+              "import { c } from '@acme/core/src/index'\n"   # grounds in src/
+              "import { d } from '@acme/core/dist/util'\n")  # falls back to pkg dir
+        self.assertEqual(self.edges(), {
+            ("packages/app", "packages/core/src"): 1,
+            ("packages/app", "packages/core"): 1,
+        })
+
+    def test_paths_alias_takes_precedence_over_workspace(self):
+        write(self.repo, "shim/core.ts", "export const c = 2\n")
+        write(self.repo, "packages/app/tsconfig.json",
+              '{"compilerOptions": {"paths": {"@acme/core": ["../../shim/core.ts"]}}}')
+        write(self.repo, "packages/app/package.json", '{"name": "@acme/app"}')
+        write(self.repo, "packages/app/main.ts",
+              "import { c } from '@acme/core'\n")
+        self.assertEqual(self.edges(), {("packages/app", "shim"): 1})
+
+
+class TestJsFixtureParity(unittest.TestCase):
+    """Issue-3 acceptance: a fixture with Next.js-style `@/…` aliases and a
+    pnpm workspace `@scope/…` import produces exactly the edges the
+    equivalent relative imports produce, and unresolved aliases are counted
+    for the uncertainty note."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = self.tmp.name
+        write(self.repo, "pnpm-workspace.yaml",
+              "packages:\n  - 'packages/*'\n  - 'apps/*'\n")
+        write(self.repo, "apps/web/tsconfig.json",
+              '{\n'
+              '  "compilerOptions": {\n'
+              '    "baseUrl": ".", // Next.js default\n'
+              '    "paths": {"@/*": ["./src/*"]},\n'
+              '  },\n'
+              '}\n')
+        write(self.repo, "apps/web/package.json", '{"name": "web"}')
+        write(self.repo, "packages/core/package.json", '{"name": "@acme/core"}')
+        write(self.repo, "packages/core/src/engine.ts", "export const e = 1\n")
+        write(self.repo, "apps/web/src/components/button.tsx",
+              "export const B = 1\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def collect_edges(self, stats=None):
+        from repokg.deps import collect
+        return {(e["from"], e["to"]): e["count"]
+                for e in collect(self.repo, stats=stats)
+                if e["lang"] == "JS/TS"}
+
+    def test_alias_edges_equal_relative_edges(self):
+        write(self.repo, "apps/web/pages/index.tsx",
+              "import { B } from '@/components/button'\n"
+              "import { e } from '@acme/core'\n")
+        alias_edges = self.collect_edges()
+        write(self.repo, "apps/web/pages/index.tsx",
+              "import { B } from '../src/components/button'\n"
+              "import { e } from '../../../packages/core'\n")
+        self.assertEqual(alias_edges, self.collect_edges())
+        self.assertEqual(alias_edges, {
+            ("apps/web/pages", "apps/web/src/components"): 1,
+            ("apps/web/pages", "packages/core"): 1,
+        })
+
+    def test_unresolved_alias_counted_in_stats(self):
+        write(self.repo, "apps/web/pages/index.tsx",
+              "import { gone } from '@/deleted/widget'\n"
+              "import React from 'react'\n")  # non-alias miss: not counted
+        stats = {}
+        self.assertEqual(self.collect_edges(stats=stats), {})
+        self.assertEqual(stats, {"js_alias_unresolved": 1})
+
+    def test_uncertainty_note_rendered_from_stats(self):
+        from repokg.findings import build
+        _, notes = build({"edge_stats": {"js_alias_unresolved": 3}})
+        self.assertTrue(any("3 JS/TS alias imports" in n for n in notes))
+        _, notes = build({"edge_stats": {}})
+        self.assertFalse(any("alias imports" in n for n in notes))
 
 
 if __name__ == "__main__":

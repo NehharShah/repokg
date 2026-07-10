@@ -120,7 +120,7 @@ on the knowledge graph discovers your rules — and vice versa.
 | Branch classification | `git for-each-ref` + `--merged` ancestry vs the integration branch (auto-detects `staging`/`develop`), cross-referenced with every PR's head ref via `gh` — distinguishes true merges from squash-merges from abandoned work |
 | PR catalog | `gh pr list --state all` — open / merged / closed-unmerged, full appendix table |
 | Module inventory | Filesystem walk with LOC per directory, language detection, generated-code flagging |
-| Import graph | Go: `import` blocks resolved against `go.mod` module paths · Python: stdlib `ast` incl. relative imports · JS/TS: relative `import`/`require` resolution · Rust: `use` declarations resolved against Cargo crate names (cross-crate) and `src/` module trees (intra-crate) · Java/Kotlin: imports resolved by longest prefix against `package` declarations. Directory→directory edges with counts |
+| Import graph | Go: `import` blocks resolved against `go.mod` module paths · Python: stdlib `ast` incl. relative imports · JS/TS: `import`/`require` resolution — relative paths, tsconfig/jsconfig `paths` + `baseUrl` aliases (nearest config wins), npm/yarn/pnpm workspace package names · Rust: `use` declarations resolved against Cargo crate names (cross-crate) and `src/` module trees (intra-crate) · Java/Kotlin: imports resolved by longest prefix against `package` declarations. Directory→directory edges with counts |
 | Ops surface | CI workflow names, Dockerfiles, compose files, Helm charts, Makefile targets, config/docs/test/migration dirs |
 | Timeline | Merged PRs grouped by month with conventional-commit scope frequencies (replaced by agent-written eras after enrichment) |
 
@@ -134,8 +134,12 @@ schema — everything else stays deterministic and reproducible.
 
 ## Known limitations
 
-- **JS/TS**: only relative imports are resolved; alias imports (`@/…`,
-  tsconfig `paths`) are ignored.
+- **JS/TS**: relative imports, tsconfig/jsconfig `paths`/`baseUrl` aliases and
+  workspace package names are resolved; `extends` chains are not followed (a
+  leaf config without its own aliases is skipped rather than shadowing the
+  root's), and package `exports` maps are not modeled — subpath imports fall
+  back to the package dir. Alias imports whose targets ground nowhere are
+  counted in an uncertainty note.
 - **Fork PRs**: a fork PR whose head branch name matches a local branch will be
   linked to it (GitHub's API reports bare head refs).
 - **Python**: packages are discovered at the repo root and under `src/`;
@@ -155,7 +159,7 @@ schema — everything else stays deterministic and reproducible.
 - [x] Java / Kotlin import graphs
 - [ ] `--exclude` glob patterns
 - [ ] `llms.txt` emission alongside KNOWLEDGE_GRAPH.md
-- [ ] tsconfig `paths` alias resolution
+- [x] tsconfig `paths` alias + workspace package resolution
 - [ ] PyPI release + prebuilt GitHub Action
 
 ## Development
