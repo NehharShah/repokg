@@ -251,7 +251,12 @@ def _js_alias_resolve(imp, cfg, dirs):
             if target is not None:
                 return target
     if bare_base is not None:
-        return _existing_dir(_norm(os.path.join(bare_base, imp)), dirs)
+        target = _existing_dir(_norm(os.path.join(bare_base, imp)), dirs)
+        # _existing_dir's parent fallback would resolve any bare specifier
+        # whose first segment is missing ('react', 'lodash') to bare_base
+        # itself — those are third-party packages, not internal edges.
+        if target is not None and target != bare_base:
+            return target
     return None
 
 

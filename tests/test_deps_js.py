@@ -140,6 +140,17 @@ class TestJsAliasEdges(unittest.TestCase):
         write(self.repo, "app/main.js", "const u = require('lib/util')\n")
         self.assertEqual(self.edges(), {("app", "lib"): 1})
 
+    def test_baseurl_does_not_claim_third_party_packages(self):
+        # 'react' joined to baseUrl has no first segment in the tree; the
+        # parent fallback must not resolve it to the baseUrl dir itself.
+        write(self.repo, "src/tsconfig.json",
+              '{"compilerOptions": {"baseUrl": "."}}')
+        write(self.repo, "src/lib/a.ts", "export const a = 1\n")
+        write(self.repo, "src/app/main.ts",
+              "import React from 'react'\n"
+              "import { a } from 'lib/a'\n")
+        self.assertEqual(self.edges(), {("src/app", "src/lib"): 1})
+
     def test_nearest_config_wins_and_shadows_root(self):
         write(self.repo, "tsconfig.json",
               '{"compilerOptions": {"paths": {"~/*": ["./shared/*"]}}}')
