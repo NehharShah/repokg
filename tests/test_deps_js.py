@@ -319,5 +319,68 @@ class TestJsWorkspaceEdges(unittest.TestCase):
         self.assertEqual(self.edges(), {("packages/app", "shim"): 1})
 
 
+class TestJsFixtureParity(unittest.TestCase):
+    """Issue-3 acceptance: a fixture with Next.js-style `@/…` aliases and a
+    pnpm workspace `@scope/…` import produces exactly the edges the
+    equivalent relative imports produce, and unresolved aliases are counted
+    for the uncertainty note."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = self.tmp.name
+        write(self.repo, "pnpm-workspace.yaml",
+              "packages:\n  - 'packages/*'\n  - 'apps/*'\n")
+        write(self.repo, "apps/web/tsconfig.json",
+              '{\n'
+              '  "compilerOptions": {\n'
+              '    "baseUrl": ".", // Next.js default\n'
+              '    "paths": {"@/*": ["./src/*"]},\n'
+              '  },\n'
+              '}\n')
+        write(self.repo, "apps/web/package.json", '{"name": "web"}')
+        write(self.repo, "packages/core/package.json", '{"name": "@acme/core"}')
+        write(self.repo, "packages/core/src/engine.ts", "export const e = 1\n")
+        write(self.repo, "apps/web/src/components/button.tsx",
+              "export const B = 1\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def collect_edges(self, stats=None):
+        from repokg.deps import collect
+        return {(e["from"], e["to"]): e["count"]
+                for e in collect(self.repo, stats=stats)
+                if e["lang"] == "JS/TS"}
+
+    def test_alias_edges_equal_relative_edges(self):
+        write(self.repo, "apps/web/pages/index.tsx",
+              "import { B } from '@/components/button'\n"
+              "import { e } from '@acme/core'\n")
+        alias_edges = self.collect_edges()
+        write(self.repo, "apps/web/pages/index.tsx",
+              "import { B } from '../src/components/button'\n"
+              "import { e } from '../../../packages/core'\n")
+        self.assertEqual(alias_edges, self.collect_edges())
+        self.assertEqual(alias_edges, {
+            ("apps/web/pages", "apps/web/src/components"): 1,
+            ("apps/web/pages", "packages/core"): 1,
+        })
+
+    def test_unresolved_alias_counted_in_stats(self):
+        write(self.repo, "apps/web/pages/index.tsx",
+              "import { gone } from '@/deleted/widget'\n"
+              "import React from 'react'\n")  # non-alias miss: not counted
+        stats = {}
+        self.assertEqual(self.collect_edges(stats=stats), {})
+        self.assertEqual(stats, {"js_alias_unresolved": 1})
+
+    def test_uncertainty_note_rendered_from_stats(self):
+        from repokg.findings import build
+        _, notes = build({"edge_stats": {"js_alias_unresolved": 3}})
+        self.assertTrue(any("3 JS/TS alias imports" in n for n in notes))
+        _, notes = build({"edge_stats": {}})
+        self.assertFalse(any("alias imports" in n for n in notes))
+
+
 if __name__ == "__main__":
     unittest.main()

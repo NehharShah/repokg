@@ -18,8 +18,10 @@ _EDGE_METHODS = {
     "Go": ("high", "imports resolved against go.mod module paths (exact)"),
     "Python": ("high", "stdlib ast parse; note: package discovery covers repo "
                        "root and src/ only"),
-    "JS/TS": ("medium", "regex over relative imports only; aliases and "
-                        "tsconfig paths are not resolved"),
+    "JS/TS": ("medium", "regex import extraction; relative imports, "
+                        "tsconfig/jsconfig paths + baseUrl aliases and "
+                        "workspace package names all resolved; `extends` "
+                        "chains and package `exports` maps are not"),
     "Rust": ("medium", "regex `use` parsing resolved against Cargo [package] "
                        "names and src/ module dirs; macros, re-exports and "
                        "path-dependencies are not resolved"),
@@ -83,6 +85,12 @@ def build(kg):
             "path-name heuristic (generated/sqlcgen/pb/bindings/...); "
             "verify before excluding from review",
             [m["path"] for m in gen], "low"))
+
+    unresolved = kg.get("edge_stats", {}).get("js_alias_unresolved", 0)
+    if unresolved:
+        notes.append("%d JS/TS alias imports matched a tsconfig/jsconfig "
+                     "paths pattern but their targets exist nowhere in the "
+                     "tree; those edges were dropped." % unresolved)
 
     if kg.get("github_note"):
         notes.append("PR layer incomplete: %s — branch statuses degrade to "

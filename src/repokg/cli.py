@@ -20,13 +20,15 @@ def scan(repo, out, no_github, pr_limit):
     github.classify(branches, prs, info["trunk"], info["integration"])
     tree = dict(code.walk(repo))  # single filesystem walk, shared by all collectors
     languages, modules = code.collect(repo, tree)
+    edge_stats = {}
     kg = {
         "repokg_version": 1,
         "generated_at": datetime.date.today().isoformat(),
         "repo": info,
         "languages": languages,
         "modules": modules,
-        "edges": deps.collect(repo, tree),
+        "edges": deps.collect(repo, tree, edge_stats),
+        "edge_stats": edge_stats,
         "branches": branches,
         "prs": prs,
         "github_note": note,
