@@ -164,7 +164,9 @@ def main(argv=None):
     ap.add_argument("--exclude", action="append", default=[], metavar="PATTERN",
                     help="glob matched against repo-relative paths; matching "
                          "dirs are pruned, matching files dropped (repeatable; "
-                         "`*` crosses `/`, so '*fixtures' matches any depth)")
+                         "`*` crosses `/`, so '*fixtures' matches any depth). "
+                         "Unioned with <repo>/.repokgignore (one glob per "
+                         "line, # comments)")
     ap.add_argument("--no-github", action="store_true", help="skip gh PR lookup")
     ap.add_argument("--pr-limit", type=int, default=1000, help="max PRs to fetch (default 1000)")
     ap.add_argument("--diff", action="store_true",
@@ -182,10 +184,12 @@ def main(argv=None):
         return 2
     out = args.out or os.path.join(repo, ".repokg")
     md = args.md or os.path.join(repo, "KNOWLEDGE_GRAPH.md")
+    # union of CLI flags and the committed ignore file, deduped
+    exclude = list(dict.fromkeys(args.exclude + code.load_ignore(repo)))
 
     try:
         if args.command == "scan":
-            scan(repo, out, args.no_github, args.pr_limit, args.exclude)
+            scan(repo, out, args.no_github, args.pr_limit, exclude)
         elif args.command == "prompts":
             write_prompts(repo, out, md)
         elif args.command == "render":
@@ -199,7 +203,7 @@ def main(argv=None):
         elif args.command == "check":
             return check(repo, out, md)
         else:  # generate
-            scan(repo, out, args.no_github, args.pr_limit, args.exclude)
+            scan(repo, out, args.no_github, args.pr_limit, exclude)
             write_prompts(repo, out, md)
             return render(out, md)
     except RuntimeError as e:
