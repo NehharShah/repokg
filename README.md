@@ -72,7 +72,31 @@ timeline eras, and gotchas alongside the deterministic structure.
 | `repokg check [path]` | Exit 1 if the knowledge graph is stale vs `HEAD` (CI-friendly) |
 
 Flags: `--out DIR` (default `<repo>/.repokg`), `--md FILE` (default `<repo>/KNOWLEDGE_GRAPH.md`),
-`--no-github`, `--pr-limit N`, `--diff`, `--json`.
+`--exclude PATTERN` (repeatable), `--no-github`, `--pr-limit N`, `--diff`, `--json`.
+
+### Excluding paths
+
+Common noise (`node_modules`, `.git`, build output, …) is skipped automatically.
+For repo-specific noise — fixtures, snapshots, vendored trees, generated docs —
+add globs on the command line or in a committed `.repokgignore` at the repo root:
+
+```sh
+repokg scan --exclude '*fixtures' --exclude 'docs/gen'
+```
+
+```
+# .repokgignore — one glob per line, same semantics as --exclude
+*fixtures
+*.snap
+packages/*/gen
+```
+
+Patterns are matched (`fnmatch`) against repo-relative paths; matching
+directories are pruned wholesale and matching files dropped, so modules, import
+edges, and ops all inherit the exclusion. `*` crosses `/`: `*fixtures` matches
+at any depth, `fixtures` only at the root. CLI patterns and `.repokgignore` are
+unioned. Exclusions are never silent — `scan` prints what it dropped, `kg.json`
+records the patterns and counts, and `repokg audit` carries an uncertainty note.
 
 ## Honesty layer
 
@@ -157,7 +181,7 @@ schema — everything else stays deterministic and reproducible.
 
 - [x] Rust import graph
 - [x] Java / Kotlin import graphs
-- [ ] `--exclude` glob patterns
+- [x] `--exclude` glob patterns + `.repokgignore`
 - [ ] `llms.txt` emission alongside KNOWLEDGE_GRAPH.md
 - [x] tsconfig `paths` alias + workspace package resolution
 - [ ] PyPI release + prebuilt GitHub Action

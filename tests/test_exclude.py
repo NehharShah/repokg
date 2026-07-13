@@ -1,8 +1,12 @@
+import contextlib
+import io
+import json
 import os
+import subprocess
 import tempfile
 import unittest
 
-from repokg.code import walk
+from repokg.code import load_ignore, walk
 from repokg.findings import build
 
 
@@ -95,6 +99,53 @@ class TestExcludeFinding(unittest.TestCase):
     def test_no_note_without_exclude_key(self):
         _, notes = build({"repo": {}})
         self.assertFalse([n for n in notes if "invisible" in n])
+
+
+class TestRepokgIgnore(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_missing_file_is_empty(self):
+        self.assertEqual(load_ignore(self.repo), [])
+
+    def test_comments_and_blanks_skipped(self):
+        write(self.repo, ".repokgignore",
+              "# vendored trees\n"
+              "*fixtures\n"
+              "\n"
+              "  docs/gen  \n"
+              "   \n"
+              "# eof\n")
+        self.assertEqual(load_ignore(self.repo), ["*fixtures", "docs/gen"])
+
+    def test_ignore_file_patterns_prune_walk(self):
+        write(self.repo, ".repokgignore", "*fixtures\n")
+        write(self.repo, "src/app.py")
+        write(self.repo, "src/fixtures/big.py")
+        seen = {rel for rel, _ in walk(self.repo, load_ignore(self.repo))}
+        self.assertIn("src", seen)
+        self.assertNotIn("src/fixtures", seen)
+
+    def test_scan_unions_cli_and_ignore_file(self):
+        from repokg.cli import main
+        subprocess.run(["git", "init", "-q", self.repo], check=True)
+        write(self.repo, "src/app.py")
+        write(self.repo, "src/fixtures/big.py")
+        # *.snap in both places: union must dedupe
+        write(self.repo, ".repokgignore", "# vendored\n*fixtures\n*.snap\n")
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            rc = main(["scan", self.repo, "--no-github", "--exclude", "*.snap"])
+        self.assertEqual(rc, 0)
+        with open(os.path.join(self.repo, ".repokg", "kg.json")) as f:
+            kg = json.load(f)
+        self.assertEqual(kg["exclude"]["patterns"], ["*.snap", "*fixtures"])
+        self.assertEqual(kg["exclude"]["dirs"], 1)
+        self.assertNotIn("src/fixtures", [m["path"] for m in kg["modules"]])
+        self.assertIn("excluded 1 dirs", buf.getvalue())
 
 
 if __name__ == "__main__":

@@ -39,6 +39,23 @@ GENERATED_RE = re.compile(r"(generated|sqlcgen|_pb2|\.pb\.|/pb$|/pb/|bindings)")
 MAX_FILE_BYTES = 2_000_000
 
 
+IGNORE_FILE = ".repokgignore"
+
+
+def load_ignore(repo):
+    """Patterns from <repo>/.repokgignore: one glob per line, # comments.
+
+    Same semantics as --exclude; committed so the whole team shares it.
+    """
+    try:
+        with open(os.path.join(repo, IGNORE_FILE), encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return []
+    stripped = (ln.strip() for ln in lines)
+    return [ln for ln in stripped if ln and not ln.startswith("#")]
+
+
 def _excluded(rel, exclude):
     return any(fnmatch.fnmatch(rel, pat) for pat in exclude)
 
