@@ -86,6 +86,13 @@ def build(kg):
             "verify before excluding from review",
             [m["path"] for m in gen], "low"))
 
+    excl = kg.get("exclude", {})
+    if excl.get("dirs") or excl.get("files"):
+        notes.append("%d dirs and %d files excluded by configured patterns "
+                     "(%s); everything under them is invisible to this graph."
+                     % (excl.get("dirs", 0), excl.get("files", 0),
+                        ", ".join(excl.get("patterns", [])) or "?"))
+
     unresolved = kg.get("edge_stats", {}).get("js_alias_unresolved", 0)
     if unresolved:
         notes.append("%d JS/TS alias imports matched a tsconfig/jsconfig "

@@ -11,14 +11,16 @@ from . import (__version__, code, deps, findings, github, gitinfo, inject,
                markdown, ops, prompts, validate)
 
 
-def scan(repo, out, no_github, pr_limit):
+def scan(repo, out, no_github, pr_limit, exclude=()):
     info, branches = gitinfo.collect(repo)
     if no_github:
         prs, note = [], "GitHub lookup disabled (--no-github)"
     else:
         prs, note = github.collect(repo, pr_limit)
     github.classify(branches, prs, info["trunk"], info["integration"])
-    tree = dict(code.walk(repo))  # single filesystem walk, shared by all collectors
+    walk_stats = {}
+    # single filesystem walk, shared by all collectors — exclusions inherit
+    tree = dict(code.walk(repo, exclude, walk_stats))
     languages, modules = code.collect(repo, tree)
     edge_stats = {}
     kg = {
@@ -29,6 +31,11 @@ def scan(repo, out, no_github, pr_limit):
         "modules": modules,
         "edges": deps.collect(repo, tree, edge_stats),
         "edge_stats": edge_stats,
+        "exclude": {
+            "patterns": sorted(exclude),
+            "dirs": walk_stats.get("excluded_dirs", 0),
+            "files": walk_stats.get("excluded_files", 0),
+        },
         "branches": branches,
         "prs": prs,
         "github_note": note,
@@ -39,6 +46,10 @@ def scan(repo, out, no_github, pr_limit):
     path = os.path.join(out, "kg.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(kg, f, indent=1)
+    excl = kg["exclude"]
+    if excl["dirs"] or excl["files"]:
+        print("excluded %d dirs, %d files (%d exclude patterns)" %
+              (excl["dirs"], excl["files"], len(excl["patterns"])))
     print("wrote %s (%d modules, %d edges, %d branches, %d PRs)" %
           (path, len(modules), len(kg["edges"]), len(branches), len(prs)))
     return kg
@@ -150,6 +161,10 @@ def main(argv=None):
     ap.add_argument("path", nargs="?", default=".", help="repository path (default: .)")
     ap.add_argument("--out", default=None, help="output dir (default: <repo>/.repokg)")
     ap.add_argument("--md", default=None, help="markdown output (default: <repo>/KNOWLEDGE_GRAPH.md)")
+    ap.add_argument("--exclude", action="append", default=[], metavar="PATTERN",
+                    help="glob matched against repo-relative paths; matching "
+                         "dirs are pruned, matching files dropped (repeatable; "
+                         "`*` crosses `/`, so '*fixtures' matches any depth)")
     ap.add_argument("--no-github", action="store_true", help="skip gh PR lookup")
     ap.add_argument("--pr-limit", type=int, default=1000, help="max PRs to fetch (default 1000)")
     ap.add_argument("--diff", action="store_true",
@@ -170,7 +185,7 @@ def main(argv=None):
 
     try:
         if args.command == "scan":
-            scan(repo, out, args.no_github, args.pr_limit)
+            scan(repo, out, args.no_github, args.pr_limit, args.exclude)
         elif args.command == "prompts":
             write_prompts(repo, out, md)
         elif args.command == "render":
@@ -184,7 +199,7 @@ def main(argv=None):
         elif args.command == "check":
             return check(repo, out, md)
         else:  # generate
-            scan(repo, out, args.no_github, args.pr_limit)
+            scan(repo, out, args.no_github, args.pr_limit, args.exclude)
             write_prompts(repo, out, md)
             return render(out, md)
     except RuntimeError as e:

@@ -1,5 +1,6 @@
 """Code collectors: language breakdown, module discovery, LOC."""
 
+import fnmatch
 import os
 import re
 
@@ -38,15 +39,44 @@ GENERATED_RE = re.compile(r"(generated|sqlcgen|_pb2|\.pb\.|/pb$|/pb/|bindings)")
 MAX_FILE_BYTES = 2_000_000
 
 
-def walk(repo):
-    """os.walk with skip-dir pruning; yields (rel_dir, filenames)."""
+def _excluded(rel, exclude):
+    return any(fnmatch.fnmatch(rel, pat) for pat in exclude)
+
+
+def walk(repo, exclude=None, stats=None):
+    """os.walk with skip-dir pruning; yields (rel_dir, filenames).
+
+    exclude: glob patterns fnmatch'd against repo-relative paths ("docs",
+    "*/fixtures", "packages/*/gen"). Matching dirs are pruned wholesale
+    (fnmatch's `*` crosses `/`, so "*fixtures" matches at any depth);
+    matching files are dropped. stats: optional dict that receives
+    "excluded_dirs"/"excluded_files" counts.
+    """
+    exclude = exclude or ()
     for dirpath, dirnames, filenames in os.walk(repo):
-        dirnames[:] = sorted(
-            d for d in dirnames
-            if d not in SKIP_DIRS and not (d.startswith(".") and d != ".github")
-        )
         rel = os.path.relpath(dirpath, repo)
-        yield ("" if rel == "." else rel.replace(os.sep, "/")), filenames
+        rel = "" if rel == "." else rel.replace(os.sep, "/")
+        keep = []
+        for d in sorted(dirnames):
+            if d in SKIP_DIRS or (d.startswith(".") and d != ".github"):
+                continue
+            if _excluded(rel + "/" + d if rel else d, exclude):
+                if stats is not None:
+                    stats["excluded_dirs"] = stats.get("excluded_dirs", 0) + 1
+                continue
+            keep.append(d)
+        dirnames[:] = keep
+        if exclude:
+            kept, dropped = [], 0
+            for f in filenames:
+                if _excluded(rel + "/" + f if rel else f, exclude):
+                    dropped += 1
+                else:
+                    kept.append(f)
+            filenames = kept
+            if dropped and stats is not None:
+                stats["excluded_files"] = stats.get("excluded_files", 0) + dropped
+        yield rel, filenames
 
 
 def count_loc(path):
