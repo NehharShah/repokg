@@ -110,6 +110,41 @@ def aggregate(path, depth):
     return "/".join(parts[:depth])
 
 
+def _aggregate_edges(edges, depth):
+    agg = Counter()
+    for e in edges:
+        f, t = aggregate(e["from"], depth), aggregate(e["to"], depth)
+        if f != t:
+            agg[(f, t)] += e["count"]
+    return agg
+
+
+def _choose_graph(edges):
+    """Pick the aggregation depth for the mermaid graph.
+
+    Prefer depth 2, coarsening to depth 1 when there are too many nodes.
+    In deep monorepo layouts every edge can collapse to a self-edge at
+    those depths; then deepen until some cross-boundary edges survive.
+    Returns (depth, agg, nodes), or None if no depth yields any edge.
+    """
+    max_depth = max(len(p.split("/")) for e in edges for p in (e["from"], e["to"]))
+    over_cap = []
+    for depth in [2, 1] + list(range(3, max_depth + 1)):
+        agg = _aggregate_edges(edges, depth)
+        if not agg:
+            continue
+        nodes = {x for pair in agg for x in pair}
+        if len(nodes) <= MERMAID_MAX_NODES:
+            return depth, agg, nodes
+        over_cap.append((len(nodes), depth, agg, nodes))
+        if depth >= 3:
+            break  # node count only grows with depth from here
+    if not over_cap:
+        return None
+    _, depth, agg, nodes = min(over_cap, key=lambda c: (c[0], c[1]))
+    return depth, agg, nodes
+
+
 def _graph_section(w, edges):
     w("## 3. Architecture graph (imports)")
     w("")
@@ -117,15 +152,13 @@ def _graph_section(w, edges):
         w("_No internal import edges detected._")
         w("")
         return
-    for depth in (2, 1):
-        agg = Counter()
-        for e in edges:
-            f, t = aggregate(e["from"], depth), aggregate(e["to"], depth)
-            if f != t:
-                agg[(f, t)] += e["count"]
-        nodes = {x for pair in agg for x in pair}
-        if len(nodes) <= MERMAID_MAX_NODES or depth == 1:
-            break
+    chosen = _choose_graph(edges)
+    if chosen is None:
+        w("_All %d import edges are internal to single modules — no cross-module "
+          "edges to draw at any aggregation depth (see §5 for the full list)._" % len(edges))
+        w("")
+        return
+    depth, agg, nodes = chosen
     w("```mermaid")
     w("flowchart LR")
     for node in sorted(nodes):
