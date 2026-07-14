@@ -50,6 +50,45 @@ class TestRender(unittest.TestCase):
         self.assertEqual(aggregate("a/b/c", 2), "a/b")
         self.assertEqual(aggregate("a", 2), "a")
 
+    def test_mermaid_deepens_when_depth2_collapses_to_self_edges(self):
+        # Deep monorepo layout: every edge is intra-service, so depth-2 (and
+        # depth-1) aggregation collapses all edges to self-edges. The renderer
+        # must deepen until cross-boundary edges survive instead of emitting
+        # an empty flowchart.
+        kg = dict(KG)
+        kg["edges"] = [
+            {"from": "apps/backend/svc-a/internal/x",
+             "to": "apps/backend/svc-a/internal/y", "lang": "Go", "count": 3},
+            {"from": "apps/frontend/dash/src/components",
+             "to": "apps/frontend/dash/src/lib", "lang": "JS/TS", "count": 2},
+        ]
+        doc = render(kg, {})
+        graph = doc.split("## 3.")[1].split("## 4.")[0]
+        self.assertIn("-->", graph)
+        self.assertIn("apps_backend_svc_a_internal_x --> apps_backend_svc_a_internal_y", graph)
+        self.assertIn("Aggregated to path depth 5", graph)
+
+    def test_mermaid_note_when_no_cross_module_edges_at_any_depth(self):
+        kg = dict(KG)
+        kg["edges"] = [{"from": "a/b", "to": "a/b", "lang": "Go", "count": 1}]
+        doc = render(kg, {})
+        graph = doc.split("## 3.")[1].split("## 4.")[0]
+        self.assertNotIn("flowchart LR", graph)
+        self.assertIn("no cross-module", graph)
+
+    def test_mermaid_still_coarsens_to_depth1_when_too_many_nodes(self):
+        # 30 distinct depth-2 importers exceed the node cap; depth 1 keeps the
+        # graph non-empty, so the renderer must coarsen (original behavior).
+        kg = dict(KG)
+        kg["edges"] = [
+            {"from": "mod%d/sub/x" % i, "to": "core/lib/y", "lang": "Go", "count": 1}
+            for i in range(30)
+        ]
+        doc = render(kg, {})
+        graph = doc.split("## 3.")[1].split("## 4.")[0]
+        self.assertIn("mod0 --> core", graph)
+        self.assertIn("Aggregated to path depth 1", graph)
+
     def test_render_structure_only(self):
         doc = render(KG, {})
         for needle in ("# demo — Codebase Knowledge Graph", "## 1. Repo at a glance",
