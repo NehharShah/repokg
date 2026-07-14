@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "repokg"
-version = "0.4.1"
+version = "0.4.2"
 description = "Generate an AI-ready knowledge graph (KNOWLEDGE_GRAPH.md + kg.json) of any codebase: modules, dependency edges, branches, PRs, ops surface."
 readme = "README.md"
 license = { text = "MIT" }
