@@ -7,11 +7,11 @@ import json
 import os
 import sys
 
-from . import (__version__, code, deps, facts, findings, github, gitinfo,
-               inject, markdown, ops, prompts, validate)
+from . import (__version__, cache, code, deps, facts, findings, github,
+               gitinfo, inject, markdown, ops, prompts, validate)
 
 
-def scan(repo, out, no_github, pr_limit, exclude=()):
+def scan(repo, out, no_github, pr_limit, exclude=(), use_cache=True):
     info, branches = gitinfo.collect(repo)
     if no_github:
         prs, note = [], "GitHub lookup disabled (--no-github)"
@@ -22,8 +22,10 @@ def scan(repo, out, no_github, pr_limit, exclude=()):
     # single filesystem walk, shared by all collectors — exclusions inherit
     tree = dict(code.walk(repo, exclude, walk_stats))
     # single read per file too: the store memoizes extracted facts across
-    # collectors that would otherwise each open the same file
-    store = facts.Store(repo)
+    # collectors that would otherwise each open the same file, and replays
+    # them from the cache for files that have not changed since the last scan
+    scan_cache, cache_note = cache.open_(repo, out, info["head"], use_cache)
+    store = facts.Store(repo, scan_cache)
     languages, modules = code.collect(repo, tree, store)
     edge_stats = {}
     kg = {
@@ -49,13 +51,30 @@ def scan(repo, out, no_github, pr_limit, exclude=()):
     path = os.path.join(out, "kg.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(kg, f, indent=1)
+    if scan_cache is not None:
+        scan_cache.save(out, info["head"])
     excl = kg["exclude"]
     if excl["dirs"] or excl["files"]:
         print("excluded %d dirs, %d files (%d exclude patterns)" %
               (excl["dirs"], excl["files"], len(excl["patterns"])))
+    print(_cache_line(scan_cache, cache_note, store))
     print("wrote %s (%d modules, %d edges, %d branches, %d PRs)" %
           (path, len(modules), len(kg["edges"]), len(branches), len(prs)))
     return kg
+
+
+def _cache_line(scan_cache, note, store):
+    """How much of this scan was replayed rather than parsed.
+
+    Printed, never stored: a warm scan and a cold scan must write identical
+    kg.json, and this is exactly the number that differs between them.
+    """
+    if scan_cache is None:
+        return "cache: %s — parsed %d files" % (note, store.parses)
+    if note != "warm":
+        return "cache: cold (%s) — parsed %d files" % (note, store.parses)
+    return ("cache: replayed %d of %d files, parsed %d"
+            % (scan_cache.hits, scan_cache.hits + store.parses, store.parses))
 
 
 def write_prompts(repo, out, md):
@@ -171,6 +190,10 @@ def main(argv=None):
                          "Unioned with <repo>/.repokgignore (one glob per "
                          "line, # comments)")
     ap.add_argument("--no-github", action="store_true", help="skip gh PR lookup")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="ignore <out>/cache.json and re-parse every file; "
+                         "the cache is an optimization only, so this changes "
+                         "how long a scan takes and nothing it produces")
     ap.add_argument("--pr-limit", type=int, default=1000, help="max PRs to fetch (default 1000)")
     ap.add_argument("--diff", action="store_true",
                     help="inject/clean: dry run, print what would change")
@@ -192,7 +215,8 @@ def main(argv=None):
 
     try:
         if args.command == "scan":
-            scan(repo, out, args.no_github, args.pr_limit, exclude)
+            scan(repo, out, args.no_github, args.pr_limit, exclude,
+                 not args.no_cache)
         elif args.command == "prompts":
             write_prompts(repo, out, md)
         elif args.command == "render":
@@ -206,7 +230,8 @@ def main(argv=None):
         elif args.command == "check":
             return check(repo, out, md)
         else:  # generate
-            scan(repo, out, args.no_github, args.pr_limit, exclude)
+            scan(repo, out, args.no_github, args.pr_limit, exclude,
+                 not args.no_cache)
             write_prompts(repo, out, md)
             return render(out, md)
     except RuntimeError as e:

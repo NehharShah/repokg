@@ -127,22 +127,34 @@ class Store:
     twice. Only `.yaml`/`.yml` metadata (pnpm-workspace.yaml) is in both sets,
     which is one extra read per repo — not worth a shared byte cache, since
     that would mean holding every source file in memory for the whole scan.
-    `reads` counts opens, and is the number the cache has to drive to zero.
+
+    An optional `cache` supplies records from a previous scan for files that
+    have not changed, in which case those files are never opened. `parses`
+    counts the files this scan actually extracted facts from, and is what a
+    warm scan of an untouched repo has to drive to zero; `reads` counts every
+    open, including the metadata files that are always re-read.
     """
 
-    def __init__(self, repo):
+    def __init__(self, repo, cache=None):
         self.repo = repo
+        self.cache = cache
         self.reads = 0
+        self.parses = 0
         self._facts = {}
         self._text = {}
 
     def facts(self, rel, name):
         key = (rel + "/" + name) if rel else name
         rec = self._facts.get(key)
+        if rec is not None:
+            return rec
+        rec = self.cache.replay(key) if self.cache is not None else None
         if rec is None:
             rec = self._extract(key)
-            if rec:  # only files with a known language or extractor are kept
-                self._facts[key] = rec
+            if rec and self.cache is not None:
+                self.cache.record(key, rec)
+        if rec:  # only files with a known language or extractor are kept
+            self._facts[key] = rec
         return rec
 
     def text(self, rel, name):
@@ -157,6 +169,7 @@ class Store:
         parse = _EXTRACTORS.get(ext)
         if lang is None and parse is None:
             return {}
+        self.parses += 1
         rec = {"lang": lang} if lang else {}
         if parse is None:
             rec["loc"] = self._loc_only(key)
