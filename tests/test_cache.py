@@ -1,18 +1,34 @@
+import collections
 import contextlib
+import hashlib
+import inspect
 import io
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
 import unittest
 
-from repokg import cache
+from repokg import cache, code, deps, facts, gitinfo
 from repokg.cli import main
+from repokg.facts import FACTS_VERSION
 from repokg.inject import clean
 
 ENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@x",
            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@x")
+
+FIXTURE = {
+    ".gitignore": "gen/\n.repokg/\n",
+    "pkg/__init__.py": "",
+    "pkg/a.py": "import os\n",
+    "pkg/b.py": "from pkg import a\n",
+    "web/index.ts": "import {x} from './util';\n",
+    "web/util.ts": "export const x = 1;\n",
+}
+
+Result = collections.namedtuple("Result", "note parses hits graph")
 
 
 def git(repo, *args):
@@ -28,71 +44,88 @@ def write(root, rel, text):
 
 
 class CacheCase(unittest.TestCase):
+    """One git repo built per class and copied per test.
+
+    `scan` drives the cache layer directly rather than the CLI. Everything the
+    cache can influence is here — languages, modules, edges all come through
+    the store — while branches, PRs and the ops surface do not touch it, and
+    collecting them costs a dozen git subprocesses per scan. The CLI's own
+    wiring is covered separately in TestCliReporting.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.template = tempfile.mkdtemp()
+        for rel, text in FIXTURE.items():
+            write(cls.template, rel, text)
+        git(cls.template, "init", "-q", "-b", "main", ".")
+        git(cls.template, "add", "-A")
+        git(cls.template, "commit", "-qm", "base")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.template, ignore_errors=True)
+
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.repo = self.tmp.name
-        write(self.repo, ".gitignore", "gen/\n.repokg/\n")
-        write(self.repo, "pkg/__init__.py", "")
-        write(self.repo, "pkg/a.py", "import os\n")
-        write(self.repo, "pkg/b.py", "from pkg import a\n")
-        write(self.repo, "web/index.ts", "import {x} from './util';\n")
-        write(self.repo, "web/util.ts", "export const x = 1;\n")
-        git(self.repo, "init", "-q", "-b", "main", ".")
-        git(self.repo, "add", "-A")
-        git(self.repo, "commit", "-qm", "base")
+        self.tmp = tempfile.mkdtemp()
+        self.repo = os.path.join(self.tmp, "repo")
+        shutil.copytree(self.template, self.repo)
+        self.out = os.path.join(self.repo, ".repokg")
 
     def tearDown(self):
-        self.tmp.cleanup()
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def scan(self, *extra):
-        """Run a scan, returning its cache report line."""
-        with contextlib.redirect_stdout(io.StringIO()) as buf:
-            rc = main(["scan", self.repo, "--no-github"] + list(extra))
-        self.assertEqual(rc, 0, buf.getvalue())
-        lines = [ln for ln in buf.getvalue().splitlines()
-                 if ln.startswith("cache:")]
-        self.assertEqual(len(lines), 1, buf.getvalue())
-        return lines[0]
-
-    def kg(self):
-        with open(os.path.join(self.repo, ".repokg", "kg.json"),
-                  encoding="utf-8") as f:
-            return f.read()
+    def scan(self, no_cache=False, exclude=(), store_cls=facts.Store):
+        head = gitinfo.try_run(self.repo, "rev-parse", "HEAD")
+        c, note = cache.open_(self.repo, self.out, head, not no_cache)
+        store = store_cls(self.repo, c)
+        tree = dict(code.walk(self.repo, exclude))
+        languages, modules = code.collect(self.repo, tree, store)
+        edges = deps.collect(self.repo, tree, None, store)
+        if c is not None:
+            c.save(self.out, head)
+        return Result(note, store.parses, c.hits if c else 0,
+                      (languages, modules, edges))
 
     def doc(self):
-        with open(os.path.join(self.repo, ".repokg", cache.CACHE_FILE),
+        with open(os.path.join(self.out, cache.CACHE_FILE),
                   encoding="utf-8") as f:
             return json.load(f)
 
     def write_doc(self, doc):
-        with open(os.path.join(self.repo, ".repokg", cache.CACHE_FILE),
-                  "w", encoding="utf-8") as f:
+        os.makedirs(self.out, exist_ok=True)
+        with open(os.path.join(self.out, cache.CACHE_FILE), "w",
+                  encoding="utf-8") as f:
             json.dump(doc, f)
 
     def backdate(self, rel, seconds=3600):
         """Change a file's mtime without touching its content."""
-        path = os.path.join(self.repo, rel)
         t = time.time() - seconds
-        os.utime(path, (t, t))
+        os.utime(os.path.join(self.repo, rel), (t, t))
+
+    def assert_warm_matches_cold(self, expect_parsed, label=""):
+        warm = self.scan()
+        cold = self.scan(no_cache=True)
+        self.assertEqual(warm.graph, cold.graph, label)
+        self.assertEqual(warm.parses, expect_parsed, label)
 
 
 class TestWarmScan(CacheCase):
     def test_first_scan_is_cold_and_seeds_the_cache(self):
-        self.assertIn("cold (no cache yet)", self.scan())
+        r = self.scan()
+        self.assertEqual(r.note, "no cache yet")
         self.assertTrue(self.doc()["files"])
 
     def test_untouched_repo_parses_nothing(self):
         self.scan()
-        self.assertIn("parsed 0", self.scan())
+        r = self.scan()
+        self.assertEqual(r.note, "warm")
+        self.assertEqual(r.parses, 0)
+        self.assertEqual(r.hits, len(self.doc()["files"]))
 
-    def test_warm_output_matches_cold_output(self):
+    def test_warm_graph_matches_cold_graph(self):
         self.scan()
-        cold = self.kg()
-        self.scan("--no-cache")
-        self.assertEqual(self.kg(), cold)
-        warm = self.scan()
-        self.assertIn("parsed 0", warm)
-        self.assertEqual(self.kg(), cold)
+        self.assert_warm_matches_cold(0)
 
     def test_document_records_identity_and_facts(self):
         self.scan()
@@ -102,23 +135,26 @@ class TestWarmScan(CacheCase):
                           "py_imports": [["os", 0]]})
         self.assertEqual(entry["size"], len("import os\n"))
         self.assertIsInstance(entry["mtime_ns"], int)
-        self.assertEqual(len(entry["blob"]), 40)
 
     def test_head_is_stored_for_the_next_diff(self):
         self.scan()
-        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo,
-                              capture_output=True, text=True).stdout.strip()
-        self.assertEqual(self.doc()["head"], head)
+        self.assertEqual(self.doc()["head"],
+                         gitinfo.try_run(self.repo, "rev-parse", "HEAD"))
+
+    def test_unchanged_document_is_not_rewritten(self):
+        """A fully warm scan re-serialising the whole cache costs more than
+        every replay in it, so it is skipped when nothing moved."""
+        self.scan()
+        path = os.path.join(self.out, cache.CACHE_FILE)
+        before = os.stat(path).st_mtime_ns
+        self.scan()
+        self.assertEqual(os.stat(path).st_mtime_ns, before)
+        write(self.repo, "pkg/c.py", "import os\n")
+        self.scan()
+        self.assertNotEqual(os.stat(path).st_mtime_ns, before)
 
 
 class TestInvalidation(CacheCase):
-    def assert_warm_matches_cold(self, expect_parsed):
-        line = self.scan()
-        warm = self.kg()
-        self.assertIn("parsed %d" % expect_parsed, line)
-        self.scan("--no-cache")
-        self.assertEqual(warm, self.kg(), line)
-
     def test_dirty_tracked_file_is_reparsed(self):
         self.scan()
         write(self.repo, "pkg/a.py", "import os\nfrom pkg import b\n")
@@ -135,11 +171,11 @@ class TestInvalidation(CacheCase):
         git(self.repo, "commit", "-qam", "change")
         self.assert_warm_matches_cold(1)
 
-    def test_rename_reparses_both_sides(self):
+    def test_rename_reparses_the_new_path(self):
         self.scan()
         git(self.repo, "mv", "pkg/a.py", "pkg/moved.py")
         git(self.repo, "commit", "-qm", "move")
-        self.assert_warm_matches_cold(1)  # old path is gone, new one is parsed
+        self.assert_warm_matches_cold(1)
 
     def test_deleted_file_leaves_the_document(self):
         self.scan()
@@ -147,6 +183,13 @@ class TestInvalidation(CacheCase):
         git(self.repo, "commit", "-qam", "delete")
         self.assert_warm_matches_cold(0)
         self.assertNotIn("pkg/a.py", self.doc()["files"])
+
+    def test_mtime_change_alone_reparses(self):
+        """No content check beyond size and mtime, so a touched file is
+        re-parsed rather than trusted."""
+        self.scan()
+        self.backdate("pkg/a.py")
+        self.assert_warm_matches_cold(1)
 
     def test_gitignored_file_is_caught_by_the_stat_gate(self):
         """repokg walks paths git ignores, so git alone cannot invalidate."""
@@ -159,110 +202,140 @@ class TestInvalidation(CacheCase):
 
     def test_excluded_files_drop_out_and_return(self):
         """An excluded file is never asked for, so it leaves the cache and
-        costs one parse when the exclusion is lifted."""
+        costs a parse when the exclusion is lifted."""
         self.scan()
-        self.scan("--exclude", "web")
-        self.assertEqual([p for p in self.doc()["files"] if p.startswith("web/")],
-                         [])
-        self.assertIn("parsed 2", self.scan())  # both web/*.ts come back
+        self.scan(exclude=["web"])
+        self.assertEqual(
+            [p for p in self.doc()["files"] if p.startswith("web/")], [])
+        self.assertEqual(self.scan().parses, 2)  # both web/*.ts come back
 
 
-class TestBlobGate(CacheCase):
-    def test_tracked_file_with_new_mtime_but_same_content_is_replayed(self):
+class TestRecordOrdering(CacheCase):
+    """A record's identity must be captured no later than its content.
+
+    If a file changes between being read and being stat'd, storing the new
+    identity beside the old facts claims the stale facts are current. Storing
+    the older identity is safe: the next scan sees a mismatch and re-parses.
+    """
+
+    def racing_store(self, target, new_text):
+        repo = self.repo
+
+        class RacingStore(facts.Store):
+            """Rewrites `target` in the window between read and stat."""
+
+            def _extract(self, key):
+                rec = facts.Store._extract(self, key)
+                if key == target:
+                    write(repo, target, new_text)
+                return rec
+
+        return RacingStore
+
+    def test_file_changed_between_read_and_stat_is_reparsed(self):
+        """The gitignored case: git cannot flag it, so ordering is all that
+        stands between the cache and a stale record.
+
+        The target must be absent from the seed scan — the window only exists
+        for a file being extracted, and a file already in the cache is
+        replayed without ever being opened.
+        """
         self.scan()
-        self.backdate("pkg/a.py")
-        self.assertIn("parsed 0", self.scan())
-
-    def test_stat_gate_alone_would_have_reparsed_it(self):
-        """Guards the blob gate itself: with no blob recorded, the same file
-        falls through to size/mtime and is re-parsed."""
-        self.scan()
-        doc = self.doc()
-        doc["files"]["pkg/a.py"]["blob"] = None
-        self.write_doc(doc)
-        self.backdate("pkg/a.py")
-        self.assertIn("parsed 1", self.scan())
-
-    def test_untracked_file_with_new_mtime_is_reparsed(self):
         write(self.repo, "gen/x.py", "import os\n")
-        self.scan()
-        self.backdate("gen/x.py")
-        self.assertIn("parsed 1", self.scan())
+        racing = self.racing_store("gen/x.py",
+                                   "import os\nimport sys\nimport json\n")
+        self.scan(store_cls=racing)
+        self.assertEqual(self.doc()["files"]["gen/x.py"]["facts"]["loc"], 1)
+        self.assert_warm_matches_cold(1)
+        self.assertEqual(self.doc()["files"]["gen/x.py"]["facts"]["loc"], 3)
 
 
 class TestDegradation(CacheCase):
     def test_truncated_cache_degrades_quietly(self):
         self.scan()
-        with open(os.path.join(self.repo, ".repokg", cache.CACHE_FILE),
-                  "w", encoding="utf-8") as f:
+        with open(os.path.join(self.out, cache.CACHE_FILE), "w",
+                  encoding="utf-8") as f:
             f.write('{"files": {"a.py": tru')
-        self.assertIn("cold (cache unreadable)", self.scan())
+        self.assertEqual(self.scan().note, "cache unreadable")
 
     def test_wrong_shape_degrades(self):
-        self.scan()
         self.write_doc({"cache_version": cache.CACHE_VERSION, "files": []})
-        self.assertIn("cold (cache malformed)", self.scan())
+        self.assertEqual(self.scan().note, "cache malformed")
 
     def test_stale_facts_version_degrades(self):
         self.scan()
         doc = self.doc()
         doc["facts_version"] = doc["facts_version"] + 1
         self.write_doc(doc)
-        self.assertIn("different repokg", self.scan())
+        self.assertEqual(self.scan().note,
+                         "cache written by a different repokg")
 
     def test_stale_cache_version_degrades(self):
         self.scan()
         doc = self.doc()
         doc["cache_version"] = doc["cache_version"] + 1
         self.write_doc(doc)
-        self.assertIn("different repokg", self.scan())
+        self.assertEqual(self.scan().note,
+                         "cache written by a different repokg")
 
     def test_unknown_cached_head_degrades(self):
         self.scan()
         doc = self.doc()
         doc["head"] = "0" * 40
         self.write_doc(doc)
-        self.assertIn("git cannot bound what changed", self.scan())
+        self.assertIn("git cannot bound what changed", self.scan().note)
 
     def test_degraded_scan_reseeds_a_usable_cache(self):
-        self.scan()
         self.write_doc({"nonsense": True})
         self.scan()
-        self.assertIn("parsed 0", self.scan())
+        self.assertEqual(self.scan().parses, 0)
 
-    def test_non_git_directory_still_scans(self):
-        plain = tempfile.mkdtemp()
-        try:
-            write(plain, "a.py", "import os\n")
-            with contextlib.redirect_stdout(io.StringIO()):
-                rc = main(["scan", plain, "--no-github"])
-            self.assertEqual(rc, 1)  # gitinfo needs a repo; cache stays out of it
-        finally:
-            import shutil
-            shutil.rmtree(plain)
-
-    def test_unwritable_out_dir_does_not_fail_the_scan(self):
-        self.scan()
-        out = os.path.join(self.repo, ".repokg")
-        path = os.path.join(out, cache.CACHE_FILE)
-        os.remove(path)
-        os.mkdir(path)  # a directory where the document should go
-        try:
-            self.assertIn("cache:", self.scan())
-        finally:
-            os.rmdir(path)
+    def test_unwritable_document_path_does_not_fail_the_scan(self):
+        os.makedirs(os.path.join(self.out, cache.CACHE_FILE))
+        r = self.scan()
+        self.assertEqual(r.note, "cache unreadable")
+        self.assertGreater(r.parses, 0)
 
 
 class TestNoCacheFlag(CacheCase):
     def test_no_cache_parses_everything(self):
-        self.scan()
-        self.assertIn("disabled (--no-cache)", self.scan("--no-cache"))
+        seeded = self.scan().parses
+        r = self.scan(no_cache=True)
+        self.assertEqual(r.note, "disabled (--no-cache)")
+        self.assertEqual(r.parses, seeded)
 
     def test_no_cache_leaves_the_document_alone(self):
         self.scan()
         before = self.doc()
-        self.scan("--no-cache")
+        self.scan(no_cache=True)
         self.assertEqual(self.doc(), before)
+
+
+class TestCliReporting(CacheCase):
+    """The CLI wiring and its report line, which the cache-layer scans skip."""
+
+    def cli(self, *extra):
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            rc = main(["scan", self.repo, "--no-github"] + list(extra))
+        self.assertEqual(rc, 0, buf.getvalue())
+        return buf.getvalue()
+
+    def test_cold_then_warm_report_lines(self):
+        self.assertIn("cache: cold (no cache yet) — parsed", self.cli())
+        self.assertIn("cache: replayed 5 of 5 files, parsed 0", self.cli())
+
+    def test_no_cache_report_line(self):
+        self.cli()
+        self.assertIn("cache: disabled (--no-cache) — parsed 5 files",
+                      self.cli("--no-cache"))
+
+    def test_report_is_not_stored_in_the_graph(self):
+        """Warm and cold must write identical kg.json, so the one number that
+        differs between them may never enter it."""
+        self.cli()
+        with open(os.path.join(self.out, "kg.json"), encoding="utf-8") as f:
+            kg = f.read()
+        self.assertNotIn("cache", kg.lower().replace("repokg", ""))
 
     def test_generate_honours_no_cache(self):
         with contextlib.redirect_stdout(io.StringIO()) as buf:
@@ -270,19 +343,17 @@ class TestNoCacheFlag(CacheCase):
         self.assertEqual(rc, 0)
         self.assertIn("disabled (--no-cache)", buf.getvalue())
 
-
-class TestReversibility(CacheCase):
     def test_clean_removes_the_cache(self):
-        self.scan()
-        out = os.path.join(self.repo, ".repokg")
-        self.assertTrue(os.path.isfile(os.path.join(out, cache.CACHE_FILE)))
-        clean(self.repo, out, os.path.join(self.repo, "KNOWLEDGE_GRAPH.md"))
-        self.assertFalse(os.path.exists(out))
+        self.cli()
+        self.assertTrue(os.path.isfile(os.path.join(self.out,
+                                                    cache.CACHE_FILE)))
+        clean(self.repo, self.out, os.path.join(self.repo, "KNOWLEDGE_GRAPH.md"))
+        self.assertFalse(os.path.exists(self.out))
 
     def test_no_temporary_file_is_left_behind(self):
-        self.scan()
-        out = os.path.join(self.repo, ".repokg")
-        self.assertEqual([f for f in os.listdir(out) if f.endswith(".tmp")], [])
+        self.cli()
+        self.assertEqual(
+            [f for f in os.listdir(self.out) if f.endswith(".tmp")], [])
 
 
 class TestGitParsing(unittest.TestCase):
@@ -316,6 +387,54 @@ class TestGitParsing(unittest.TestCase):
     def test_empty_output(self):
         self.assertEqual(cache._parse_status(""), set())
         self.assertEqual(cache._parse_diff(""), set())
+
+    def test_history_is_empty_when_head_has_not_moved(self):
+        self.assertEqual(cache._history(".", "abc", "abc"), set())
+
+    def test_history_is_unbounded_without_a_commit_on_either_side(self):
+        self.assertIsNone(cache._history(".", "", "abc"))
+        self.assertIsNone(cache._history(".", "abc", ""))
+
+
+# Everything that decides what a cached record contains. Compared against a
+# recorded value so that changing extraction without bumping FACTS_VERSION is
+# a failing test rather than a silently stale cache in someone's repo.
+FINGERPRINTS = {
+    1: "35497aa5e0f9fce9",
+}
+
+
+def _extractor_fingerprint():
+    parts = [repr(sorted(facts.LANG_BY_EXT.items())),
+             repr(facts.MAX_FILE_BYTES),
+             repr(sorted(facts.JS_EXTS)),
+             repr(sorted(facts.JVM_EXTS)),
+             repr(sorted((ext, fn.__name__)
+                         for ext, fn in facts._EXTRACTORS.items()))]
+    for name in sorted(dir(facts)):
+        if name.endswith("_RE"):
+            parts.append(name + "=" + getattr(facts, name).pattern)
+    for fn in (facts._go, facts._py, facts._js, facts._rust, facts._jvm,
+               facts._lines, facts._decode,
+               facts.Store._extract, facts.Store._loc_only):
+        parts.append(inspect.getsource(fn))
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
+
+
+class TestFactsVersionDiscipline(unittest.TestCase):
+    def test_extraction_changes_require_a_version_bump(self):
+        expected = FINGERPRINTS.get(FACTS_VERSION)
+        self.assertIsNotNone(
+            expected,
+            "FACTS_VERSION is %d but tests/test_cache.py has no fingerprint "
+            "for it — add one." % FACTS_VERSION)
+        self.assertEqual(
+            _extractor_fingerprint(), expected,
+            "\n\nExtraction changed but FACTS_VERSION is still %d.\n"
+            "A cache written by the old code would be replayed as if it were "
+            "current, which is a wrong graph and not a failing build.\n"
+            "Bump FACTS_VERSION in src/repokg/facts.py and add its "
+            "fingerprint to FINGERPRINTS in this file." % FACTS_VERSION)
 
 
 if __name__ == "__main__":

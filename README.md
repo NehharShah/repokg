@@ -90,10 +90,10 @@ cache: replayed 430 of 431 files, parsed 1
 
 A file is replayed only when `git` has not flagged it — `git diff` against the
 commit the cache was written at, plus `git status` for anything dirty, staged, or
-untracked — **and** it still looks the same on disk, by index blob sha or failing
-that size and mtime. The second check is what covers the files git cannot speak
-for: anything in `.gitignore` that repokg still walks, submodule contents, or a
-directory that is not a git checkout at all.
+untracked — **and** its size and mtime still match what was recorded. The second
+check is what covers the files git cannot speak for: anything in `.gitignore`
+that repokg still walks, submodule contents, or a directory that is not a git
+checkout at all.
 
 The cache is an optimization and nothing else. Output is identical either way
 (a test enforces byte-for-byte equality), a missing or unreadable or unusable

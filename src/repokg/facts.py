@@ -150,9 +150,13 @@ class Store:
             return rec
         rec = self.cache.replay(key) if self.cache is not None else None
         if rec is None:
+            # identity before content, never after: a file that changes in
+            # between then keeps its older identity and the next scan
+            # re-parses, where the newer one would hide the change
+            st = self.cache.stat(key) if self.cache is not None else None
             rec = self._extract(key)
             if rec and self.cache is not None:
-                self.cache.record(key, rec)
+                self.cache.record(key, rec, st)
         if rec:  # only files with a known language or extractor are kept
             self._facts[key] = rec
         return rec

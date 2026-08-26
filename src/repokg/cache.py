@@ -10,10 +10,10 @@ A cached record is replayed only when two independent gates agree:
 1. **git has not flagged the path.** `git diff` between the cached commit and
    HEAD says what changed in history; `git status` says what is dirty,
    staged, or untracked right now. Neither alone is enough.
-2. **the file still looks the same.** Its index blob sha matches, or failing
-   that its size and mtime match what was recorded. This gate is what covers
-   the files git cannot speak for — anything inside `.gitignore` that repokg
-   still walks, submodule contents, a repo that is not a git checkout at all.
+2. **the file still looks the same** — its size and mtime match what was
+   recorded. This gate is what covers the files git cannot speak for:
+   anything inside `.gitignore` that repokg still walks, submodule contents,
+   a directory that is not a git checkout at all.
 
 Both gates fail open (towards re-parsing), so the ways this can go wrong all
 cost time rather than correctness. The one exception is inherited from every
@@ -43,14 +43,22 @@ def open_(repo, out, head, enabled=True):
         return None, "disabled (--no-cache)"
     doc, reason = _load(os.path.join(out, CACHE_FILE))
     changed = None
-    if doc is not None:
-        changed = _changed(repo, doc.get("head") or "", head)
-        if changed is None:
-            reason = ("git cannot bound what changed since %s"
-                      % _short(doc.get("head") or ""))
+    if doc is None:
+        pass  # reason already says why
+    else:
+        dirty = _dirty(repo)
+        if dirty is None:
+            reason = "git cannot list working-tree changes"
+        else:
+            changed = _history(repo, doc.get("head") or "", head)
+            if changed is None:
+                reason = ("git cannot bound what changed since %s"
+                          % _short(doc.get("head") or ""))
+            else:
+                changed |= dirty
     if changed is None:
-        return Cache(repo, {}, frozenset(), _blobs(repo)), reason
-    return Cache(repo, doc["files"], changed, _blobs(repo)), "warm"
+        return Cache(repo, {}, frozenset()), reason
+    return Cache(repo, doc["files"], changed, doc.get("head") or ""), "warm"
 
 
 def _load(path):
@@ -76,11 +84,11 @@ class Cache:
     were deleted or excluded since the last scan drop out on their own.
     """
 
-    def __init__(self, repo, old, changed, blobs):
+    def __init__(self, repo, old, changed, head=""):
         self.repo = repo
         self._old = old
         self._changed = changed
-        self._blobs = blobs
+        self._old_head = head
         self._new = {}
         self.hits = 0
         self.misses = 0
@@ -90,43 +98,57 @@ class Cache:
         entry = self._old.get(key)
         if not isinstance(entry, dict) or key in self._changed:
             return None
-        st = self._stat(key)
+        st = self.stat(key)
         if st is None:
             return None
         rec = entry.get("facts")
-        blob = self._blobs.get(key)
-        same = ((blob is not None and entry.get("blob") == blob)
-                or (entry.get("size") == st[0]
-                    and entry.get("mtime_ns") == st[1]))
-        if not same or not isinstance(rec, dict):
+        if not isinstance(rec, dict):
             return None
-        self._new[key] = _entry(st, blob, rec)
+        if entry.get("size") != st[0] or entry.get("mtime_ns") != st[1]:
+            return None
+        self._new[key] = _entry(st, rec)
         self.hits += 1
         return rec
 
-    def record(self, key, rec):
-        """Store a freshly extracted record for the next scan."""
+    def record(self, key, rec, st):
+        """Store a freshly extracted record for the next scan.
+
+        `st` is the identity taken *before* the file was read — see `stat`.
+        """
         self.misses += 1
-        st = self._stat(key)
         if st is not None:
-            self._new[key] = _entry(st, self._blobs.get(key), rec)
+            self._new[key] = _entry(st, rec)
 
-    def save(self, out, head):
-        """Write the document. Failure to write is not a scan failure."""
-        doc = {"cache_version": CACHE_VERSION, "facts_version": FACTS_VERSION,
-               "head": head, "files": self._new}
-        return _save(out, doc)
+    def stat(self, key):
+        """(size, mtime_ns) for `key`, or None if it cannot be stat'd.
 
-    def _stat(self, key):
+        Callers must take this before reading the file, never after. A file
+        that changes in between then keeps its older identity, which the next
+        scan sees as a mismatch and re-parses; recording the newer identity
+        beside the older facts would instead claim the stale facts are
+        current, and for a path git cannot see nothing else would catch it.
+        """
         try:
             st = os.stat(os.path.join(self.repo, key.replace("/", os.sep)))
         except OSError:
             return None
         return st.st_size, st.st_mtime_ns
 
+    def save(self, out, head):
+        """Write the document, unless it would say exactly what is already on
+        disk. A fully warm scan otherwise re-serialises the whole cache to no
+        effect, which at 6k files costs more than every replay in it put
+        together. Failure to write is not a scan failure.
+        """
+        if head == self._old_head and self._new == self._old:
+            return True
+        return _save(out, {"cache_version": CACHE_VERSION,
+                           "facts_version": FACTS_VERSION,
+                           "head": head, "files": self._new})
 
-def _entry(st, blob, rec):
-    return {"size": st[0], "mtime_ns": st[1], "blob": blob, "facts": rec}
+
+def _entry(st, rec):
+    return {"size": st[0], "mtime_ns": st[1], "facts": rec}
 
 
 def _save(out, doc):
@@ -170,29 +192,32 @@ def _git(repo, *args):
     return p.stdout.decode("utf-8", "surrogateescape")
 
 
-def _changed(repo, cached_head, head):
-    """Repo-relative paths that may differ from the cached scan, or None if
-    git could not answer (the caller then scans cold).
+def _history(repo, cached_head, head):
+    """Paths that changed between the cached commit and HEAD, or None if git
+    could not answer (the caller then scans cold).
 
     Renames and copies contribute both sides. Adding a path that did not
     really change only costs a re-parse, so every ambiguity resolves that way.
     """
-    changed = set()
-    if cached_head != head:
-        # One side without a commit (a repo that just got its first, or lost
-        # the cached one to a rebase) leaves history unbounded: scan cold.
-        if not cached_head or not head:
-            return None
-        out = _git(repo, "diff", "--name-status", "-z", cached_head, head)
-        if out is None:
-            return None
-        changed |= _parse_diff(out)
-    # -uall lists untracked files individually; without it an untracked
-    # directory is reported as one entry and the files inside it are invisible.
-    out = _git(repo, "status", "--porcelain", "-z", "-uall")
-    if out is None:
+    if cached_head == head:
+        return set()
+    # One side without a commit (a repo that just got its first, or lost the
+    # cached one to a rebase) leaves history unbounded: scan cold.
+    if not cached_head or not head:
         return None
-    return changed | _parse_status(out)
+    out = _git(repo, "diff", "--name-status", "-z", cached_head, head)
+    return None if out is None else _parse_diff(out)
+
+
+def _dirty(repo):
+    """Paths whose working tree or index differs from HEAD, plus untracked
+    ones. None if git could not answer.
+
+    -uall lists untracked files individually; without it an untracked
+    directory arrives as a single entry and the files inside it are invisible.
+    """
+    out = _git(repo, "status", "--porcelain", "-z", "-uall")
+    return None if out is None else _parse_status(out)
 
 
 def _parse_diff(out):
@@ -228,26 +253,6 @@ def _parse_status(out):
             paths.add(toks[i])
             i += 1
     return paths
-
-
-def _blobs(repo):
-    """{path: index blob sha} from one index dump, or {} if git cannot answer.
-
-    Lets a file whose mtime moved but whose content did not — a branch switch
-    and back, a stash round trip — stay a cache hit. Only trustworthy in
-    combination with `git status`, which is what flags the paths whose working
-    tree has drifted from the index.
-    """
-    out = _git(repo, "ls-files", "-s", "-z")
-    if out is None:
-        return {}
-    blobs = {}
-    for entry in out.split("\0"):
-        meta, _, path = entry.partition("\t")
-        parts = meta.split(" ")
-        if path and len(parts) == 3:
-            blobs[path] = parts[1]
-    return blobs
 
 
 def _short(sha):
