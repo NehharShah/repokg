@@ -43,6 +43,17 @@ def write(root, rel, text):
         f.write(text)
 
 
+def copy_repo(src, dst):
+    """Copy a git repo, skipping git's transient lock files.
+
+    Background maintenance can create and remove .git/objects/*.lock while the
+    copy is in flight, and a name that disappears between copytree listing a
+    directory and reading it fails the whole copy.
+    """
+    shutil.copytree(src, dst, ignore=lambda d, names: [
+        n for n in names if n.endswith(".lock")])
+
+
 class CacheCase(unittest.TestCase):
     """One git repo built per class and copied per test.
 
@@ -59,6 +70,10 @@ class CacheCase(unittest.TestCase):
         for rel, text in FIXTURE.items():
             write(cls.template, rel, text)
         git(cls.template, "init", "-q", "-b", "main", ".")
+        # no background repacking, so the template stops changing under the
+        # per-test copies once it is built
+        git(cls.template, "config", "maintenance.auto", "false")
+        git(cls.template, "config", "gc.auto", "0")
         git(cls.template, "add", "-A")
         git(cls.template, "commit", "-qm", "base")
 
@@ -69,7 +84,7 @@ class CacheCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.repo = os.path.join(self.tmp, "repo")
-        shutil.copytree(self.template, self.repo)
+        copy_repo(self.template, self.repo)
         self.out = os.path.join(self.repo, ".repokg")
 
     def tearDown(self):
@@ -347,7 +362,8 @@ class TestCliReporting(CacheCase):
         self.cli()
         self.assertTrue(os.path.isfile(os.path.join(self.out,
                                                     cache.CACHE_FILE)))
-        clean(self.repo, self.out, os.path.join(self.repo, "KNOWLEDGE_GRAPH.md"))
+        clean(self.repo, self.out,
+              os.path.join(self.repo, "KNOWLEDGE_GRAPH.md"))
         self.assertFalse(os.path.exists(self.out))
 
     def test_no_temporary_file_is_left_behind(self):
