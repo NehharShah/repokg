@@ -4,6 +4,7 @@ import unittest
 
 from repokg.code import walk
 from repokg.deps import _jvm_modules, _jvm_package_index
+from repokg.facts import Store
 
 
 def write(root, rel, text):
@@ -24,6 +25,9 @@ class TestJVMDiscovery(unittest.TestCase):
     def tree(self):
         return dict(walk(self.repo))
 
+    def index(self):
+        return _jvm_package_index(Store(self.repo), self.tree())
+
     def test_maven_and_gradle_modules(self):
         write(self.repo, "pom.xml", "<project/>")
         write(self.repo, "core/pom.xml", "<project/>")
@@ -40,7 +44,7 @@ class TestJVMDiscovery(unittest.TestCase):
         # Kotlin: no semicolon, collapsed dir convention (dir != package path)
         write(self.repo, "api/src/main/kotlin/Handlers.kt",
               "package com.acme.api\n\nfun handle() {}\n")
-        idx = _jvm_package_index(self.repo, self.tree())
+        idx = self.index()
         self.assertEqual(idx["com.acme.core"],
                          {"core/src/main/java/com/acme/core"})
         self.assertEqual(idx["com.acme.core.util"],
@@ -51,12 +55,12 @@ class TestJVMDiscovery(unittest.TestCase):
         write(self.repo, "src/A.java",
               "/**\n * package fake.name\n */\npackage real.pkg;\nclass A {}\n")
         write(self.repo, "src/B.java", "// package another.fake\nclass B {}\n")
-        idx = _jvm_package_index(self.repo, self.tree())
+        idx = self.index()
         self.assertEqual(set(idx), {"real.pkg"})
 
     def test_default_package_files_ignored(self):
         write(self.repo, "src/Main.java", "public class Main {}\n")
-        self.assertEqual(_jvm_package_index(self.repo, self.tree()), {})
+        self.assertEqual(self.index(), {})
 
 
 if __name__ == "__main__":

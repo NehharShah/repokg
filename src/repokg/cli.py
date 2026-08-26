@@ -7,8 +7,8 @@ import json
 import os
 import sys
 
-from . import (__version__, code, deps, findings, github, gitinfo, inject,
-               markdown, ops, prompts, validate)
+from . import (__version__, code, deps, facts, findings, github, gitinfo,
+               inject, markdown, ops, prompts, validate)
 
 
 def scan(repo, out, no_github, pr_limit, exclude=()):
@@ -21,7 +21,10 @@ def scan(repo, out, no_github, pr_limit, exclude=()):
     walk_stats = {}
     # single filesystem walk, shared by all collectors — exclusions inherit
     tree = dict(code.walk(repo, exclude, walk_stats))
-    languages, modules = code.collect(repo, tree)
+    # single read per file too: the store memoizes extracted facts across
+    # collectors that would otherwise each open the same file
+    store = facts.Store(repo)
+    languages, modules = code.collect(repo, tree, store)
     edge_stats = {}
     kg = {
         "repokg_version": 1,
@@ -29,7 +32,7 @@ def scan(repo, out, no_github, pr_limit, exclude=()):
         "repo": info,
         "languages": languages,
         "modules": modules,
-        "edges": deps.collect(repo, tree, edge_stats),
+        "edges": deps.collect(repo, tree, edge_stats, store),
         "edge_stats": edge_stats,
         "exclude": {
             "patterns": sorted(exclude),

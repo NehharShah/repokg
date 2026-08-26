@@ -4,6 +4,7 @@ import unittest
 
 from repokg.code import walk
 from repokg.deps import _js_configs, _js_workspaces, _jsonc_loads, _pnpm_globs, collect
+from repokg.facts import Store
 
 
 def write(root, rel, text):
@@ -59,13 +60,13 @@ class TestJsConfigs(unittest.TestCase):
               '{"compilerOptions": {"baseUrl": "./src",'
               ' "paths": {"@/*": ["./*"]}}}')
         write(self.repo, "src/app.ts", "")
-        configs = _js_configs(self.repo, self.tree())
+        configs = _js_configs(Store(self.repo), self.tree())
         self.assertEqual(configs, {"": ("src", [("@/*", ["./*"])], "src")})
 
     def test_paths_without_baseurl_resolve_from_config_dir(self):
         write(self.repo, "web/tsconfig.json",
               '{"compilerOptions": {"paths": {"@/*": ["./src/*"]}}}')
-        configs = _js_configs(self.repo, self.tree())
+        configs = _js_configs(Store(self.repo), self.tree())
         self.assertEqual(configs["web"], ("web", [("@/*", ["./src/*"])], None))
 
     def test_jsconfig_supported_tsconfig_preferred(self):
@@ -75,7 +76,7 @@ class TestJsConfigs(unittest.TestCase):
               '{"compilerOptions": {"baseUrl": "./x"}}')
         write(self.repo, "b/tsconfig.json",
               '{"compilerOptions": {"baseUrl": "./y"}}')
-        configs = _js_configs(self.repo, self.tree())
+        configs = _js_configs(Store(self.repo), self.tree())
         self.assertEqual(configs["a"], ("a", [], "a"))
         self.assertEqual(configs["b"], ("b/y", [], "b/y"))
 
@@ -83,13 +84,13 @@ class TestJsConfigs(unittest.TestCase):
         write(self.repo, "tsconfig.json",
               '{"extends": "./tsconfig.base.json",'
               ' "compilerOptions": {"strict": true}}')
-        self.assertEqual(_js_configs(self.repo, self.tree()), {})
+        self.assertEqual(_js_configs(Store(self.repo), self.tree()), {})
 
     def test_most_specific_pattern_first(self):
         write(self.repo, "tsconfig.json",
               '{"compilerOptions": {"paths": {'
               '"@/*": ["./src/*"], "@/lib/*": ["./lib/*"], "@cfg": ["./cfg.ts"]}}}')
-        _, patterns, _ = _js_configs(self.repo, self.tree())[""]
+        _, patterns, _ = _js_configs(Store(self.repo), self.tree())[""]
         self.assertEqual([p for p, _ in patterns], ["@cfg", "@/lib/*", "@/*"])
 
 
@@ -223,7 +224,7 @@ class TestJsWorkspaces(unittest.TestCase):
               '{"name": "@acme/core"}')
         write(self.repo, "packages/ui/package.json",
               '{"name": "@acme/ui"}')
-        self.assertEqual(_js_workspaces(self.repo, self.tree()),
+        self.assertEqual(_js_workspaces(Store(self.repo), self.tree()),
                          {"@acme/core": "packages/core",
                           "@acme/ui": "packages/ui"})
 
@@ -231,7 +232,7 @@ class TestJsWorkspaces(unittest.TestCase):
         write(self.repo, "package.json",
               '{"workspaces": {"packages": ["libs/*"], "nohoist": ["**"]}}')
         write(self.repo, "libs/log/package.json", '{"name": "log"}')
-        self.assertEqual(_js_workspaces(self.repo, self.tree()),
+        self.assertEqual(_js_workspaces(Store(self.repo), self.tree()),
                          {"log": "libs/log"})
 
     def test_pnpm_workspace_yaml(self):
@@ -246,7 +247,7 @@ class TestJsWorkspaces(unittest.TestCase):
         write(self.repo, "packages/core/package.json", '{"name": "@acme/core"}')
         write(self.repo, "apps/web/package.json", '{"name": "web"}')
         write(self.repo, "tools/package.json", '{"name": "tools"}')
-        self.assertEqual(_js_workspaces(self.repo, self.tree()),
+        self.assertEqual(_js_workspaces(Store(self.repo), self.tree()),
                          {"@acme/core": "packages/core", "web": "apps/web",
                           "tools": "tools"})
 
@@ -261,19 +262,19 @@ class TestJsWorkspaces(unittest.TestCase):
         write(self.repo, "packages/core/package.json", '{"name": "core"}')
         write(self.repo, "packages/core/examples/demo/package.json",
               '{"name": "demo"}')
-        self.assertEqual(_js_workspaces(self.repo, self.tree()),
+        self.assertEqual(_js_workspaces(Store(self.repo), self.tree()),
                          {"core": "packages/core"})
 
     def test_double_star_glob_crosses_segments(self):
         write(self.repo, "package.json", '{"workspaces": ["libs/**"]}')
         write(self.repo, "libs/a/deep/pkg/package.json", '{"name": "deep"}')
-        self.assertEqual(_js_workspaces(self.repo, self.tree()),
+        self.assertEqual(_js_workspaces(Store(self.repo), self.tree()),
                          {"deep": "libs/a/deep/pkg"})
 
     def test_workspace_without_name_ignored(self):
         write(self.repo, "package.json", '{"workspaces": ["packages/*"]}')
         write(self.repo, "packages/anon/package.json", '{"private": true}')
-        self.assertEqual(_js_workspaces(self.repo, self.tree()), {})
+        self.assertEqual(_js_workspaces(Store(self.repo), self.tree()), {})
 
 
 class TestJsWorkspaceEdges(unittest.TestCase):
