@@ -104,6 +104,22 @@ One caveat, shared with every build tool that trusts `stat`: a file rewritten
 with its size and modification time preserved is invisible to both checks. Use
 `--no-cache` if you have reason to think that happened.
 
+Synthetic mixed Python/TypeScript/Java monorepos, one laptop, best of three —
+indicative only, not a benchmark suite (see #17):
+
+| files | LOC | edges | cold | warm | speedup | `cache.json` |
+|---|---|---|---|---|---|---|
+| 300 | 30k | 21 | 144 ms | 121 ms | 1.2× | 0.1 MB |
+| 1,500 | 228k | 111 | 336 ms | 129 ms | 2.6× | 0.3 MB |
+| 6,000 | 1.2M | 450 | 1,316 ms | 176 ms | 7.5× | 1.0 MB |
+
+The ratio grows with the repo because the saving is essentially the whole parse
+cost, while the warm floor does not shrink. That floor is worth knowing before
+optimising further: at 6,000 files it is roughly 100 ms of git metadata
+(branches, contributors, merge classification — none of which touches the
+cache) and 30 ms of walking, stat'ing and writing the output. Parsing, the part
+the cache removes, was around 1,150 ms of the cold scan.
+
 ### Excluding paths
 
 Common noise (`node_modules`, `.git`, build output, …) is skipped automatically.
