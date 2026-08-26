@@ -300,6 +300,17 @@ class TestDegradation(CacheCase):
         self.write_doc(doc)
         self.assertIn("git cannot bound what changed", self.scan().note)
 
+    def test_cache_without_git_to_validate_it_degrades(self):
+        """A document is only trustworthy in combination with git. With no
+        checkout to ask, neither gate can speak for any path, so nothing may
+        be replayed however well the recorded sizes and mtimes match."""
+        self.scan()
+        shutil.rmtree(os.path.join(self.repo, ".git"))
+        r = self.scan()
+        self.assertEqual(r.note, "git cannot list working-tree changes")
+        self.assertGreater(r.parses, 0)
+        self.assertEqual(r.hits, 0)
+
     def test_degraded_scan_reseeds_a_usable_cache(self):
         self.write_doc({"nonsense": True})
         self.scan()
