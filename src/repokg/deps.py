@@ -1,10 +1,13 @@
-"""Dependency-edge extraction: internal import graphs for Go, Python, JS/TS, Rust.
+"""Dependency-edge resolution: internal import graphs for Go, Python, JS/TS, Rust, JVM.
+
+Import specifiers are extracted per file by `facts`; this module only resolves
+them against repo-wide state (module paths, tsconfig aliases, workspace and
+crate names, the package index), so it reads no source files itself.
 
 Edges are directory -> directory, deduplicated with counts. Only imports that
 resolve inside the repo are kept (external/third-party imports are ignored).
 """
 
-import ast
 import fnmatch
 import json
 import os
@@ -12,15 +15,9 @@ import re
 from collections import Counter
 
 from .code import walk
+from .facts import JS_EXTS, JVM_EXTS, Store
 
-GO_BLOCK_RE = re.compile(r"^import\s*\(\s*(.*?)\s*\)", re.S | re.M)
-GO_SINGLE_RE = re.compile(r'^import\s+(?:\w+\s+)?"([^"]+)"', re.M)
-GO_QUOTED_RE = re.compile(r'"([^"]+)"')
 GO_MODULE_RE = re.compile(r"^module\s+(\S+)", re.M)
-JS_IMPORT_RE = re.compile(
-    r"""(?:from\s+|require\(\s*|import\(\s*|^\s*import\s+)['"]([^'"]+)['"]""",
-    re.M)
-JS_EXTS = (".ts", ".tsx", ".js", ".jsx", ".mjs")
 # tsconfig wins over jsconfig when a dir carries both (jsconfig is the
 # JS-only subset of the same format).
 JS_CONFIG_FILES = ("tsconfig.json", "jsconfig.json")
@@ -30,47 +27,38 @@ PNPM_ITEM_RE = re.compile(r"^\s*-\s*['\"]?([^'\"#\n]+?)['\"]?\s*$")
 # [package] section of a Cargo.toml, up to the next table header.
 CARGO_PACKAGE_RE = re.compile(r"^\[package\]\s*$(.*?)(?=^\[|\Z)", re.M | re.S)
 CARGO_NAME_RE = re.compile(r'^\s*name\s*=\s*"([^"]+)"', re.M)
-# First path segment of a `use` declaration (also `pub use`, `pub(crate) use`).
-RUST_USE_RE = re.compile(
-    r"^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+(?:::)?([A-Za-z_][A-Za-z0-9_]*)", re.M)
-# Full `use` path with an optional one-level brace group:
-# `use crate::a::b;` / `use crate::{a::b, c};` -> ("crate::a::b", None) / ("crate::", "a::b, c")
-RUST_USE_PATH_RE = re.compile(
-    r"^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+(?:::)?([A-Za-z_][\w:]*)(?:\{([^}]*)\})?",
-    re.M)
 # Built-in path roots that can never be workspace crates. `self`/`super` are
 # relative module paths; `crate::` paths are resolved dir-level below.
 RUST_SKIP = {"std", "core", "alloc", "crate", "self", "super"}
 # JVM: a Maven/Gradle module is any dir carrying its own build file.
 JVM_BUILD_FILES = ("pom.xml", "build.gradle", "build.gradle.kts")
-# `package a.b.c;` (Java) / `package a.b.c` (Kotlin, no semicolon).
-JVM_PACKAGE_RE = re.compile(r"^\s*package\s+([A-Za-z_][\w.]*)\s*;?\s*$", re.M)
-# `import a.b.C;` / `import static a.b.C.m;` / `import a.b.*;` (captured with a
-# trailing dot, stripped in code) / Kotlin `import a.b.C as D`.
-JVM_IMPORT_RE = re.compile(r"^\s*import\s+(?:static\s+)?([A-Za-z_][\w.]*)", re.M)
-JVM_EXTS = (".java", ".kt")
 
 
-def collect(repo, tree=None, stats=None):
+def collect(repo, tree=None, stats=None, store=None):
     """Return [{"from": dir, "to": dir, "lang": lang, "count": n}] sorted by count.
 
     tree: optional pre-built {rel_dir: filenames} to avoid re-walking the repo.
     stats: optional dict populated with extraction statistics —
     js_alias_unresolved: imports that matched a tsconfig/jsconfig paths
     pattern but whose targets exist nowhere in the tree (dropped edges).
+    store: optional facts.Store shared with the other collectors. Import
+    specifiers come from it already extracted; this module only resolves them
+    against repo-wide state, and so reads no source file itself.
     """
     counter = Counter()
     if tree is None:
         tree = {rel: files for rel, files in walk(repo)}
     if stats is None:
         stats = {}
+    if store is None:
+        store = Store(repo)
     dirs = set(tree)
 
-    _go_edges(repo, tree, counter)
-    _py_edges(repo, tree, dirs, counter)
-    _js_edges(repo, tree, dirs, counter, stats)
-    _rust_edges(repo, tree, counter)
-    _jvm_edges(repo, tree, counter)
+    _go_edges(store, tree, counter)
+    _py_edges(store, tree, dirs, counter)
+    _js_edges(store, tree, dirs, counter, stats)
+    _rust_edges(store, tree, counter)
+    _jvm_edges(store, tree, counter)
 
     edges = [{"from": f or "(root)", "to": t or "(root)", "lang": lang, "count": n}
              for (f, t, lang), n in counter.items()]
@@ -78,21 +66,13 @@ def collect(repo, tree=None, stats=None):
     return edges
 
 
-def _read(repo, rel, name):
-    try:
-        with open(os.path.join(repo, rel, name), encoding="utf-8", errors="replace") as f:
-            return f.read()
-    except OSError:
-        return ""
-
-
 # -- Go ----------------------------------------------------------------------
 
-def _go_edges(repo, tree, counter):
+def _go_edges(store, tree, counter):
     roots = {}  # rel dir of go.mod -> module path
     for rel, files in tree.items():
         if "go.mod" in files:
-            m = GO_MODULE_RE.search(_read(repo, rel, "go.mod"))
+            m = GO_MODULE_RE.search(store.text(rel, "go.mod"))
             if m:
                 roots[rel] = m.group(1)
     if not roots:
@@ -105,11 +85,7 @@ def _go_edges(repo, tree, counter):
         for f in files:
             if not f.endswith(".go") or f.endswith("_test.go"):
                 continue
-            src = _read(repo, rel, f)
-            imports = GO_SINGLE_RE.findall(src)
-            for block in GO_BLOCK_RE.findall(src):
-                imports.extend(GO_QUOTED_RE.findall(block))
-            for imp in imports:
+            for imp in store.facts(rel, f).get("go_imports", ()):
                 if imp != modpath and not imp.startswith(modpath + "/"):
                     continue
                 sub = imp[len(modpath):].lstrip("/")
@@ -129,7 +105,7 @@ def _owning_root(rel, roots):
 
 # -- Python ------------------------------------------------------------------
 
-def _py_edges(repo, tree, dirs, counter):
+def _py_edges(store, tree, dirs, counter):
     # Internal top-level packages: dirs at repo root or under src/ holding .py files.
     pkg_map = {}
     for rel in dirs:
@@ -143,16 +119,8 @@ def _py_edges(repo, tree, dirs, counter):
         for f in files:
             if not f.endswith(".py"):
                 continue
-            try:
-                node = ast.parse(_read(repo, rel, f))
-            except (SyntaxError, ValueError):  # ValueError: null bytes on py<=3.11
-                continue
-            for stmt in ast.walk(node):
-                if isinstance(stmt, ast.Import):
-                    for alias in stmt.names:
-                        _py_edge(rel, alias.name, 0, pkg_map, dirs, counter)
-                elif isinstance(stmt, ast.ImportFrom):
-                    _py_edge(rel, stmt.module or "", stmt.level, pkg_map, dirs, counter)
+            for module, level in store.facts(rel, f).get("py_imports", ()):
+                _py_edge(rel, module, level, pkg_map, dirs, counter)
 
 
 def _py_edge(rel, module, level, pkg_map, dirs, counter):
@@ -174,21 +142,21 @@ def _py_edge(rel, module, level, pkg_map, dirs, counter):
 
 # -- JS / TS -----------------------------------------------------------------
 
-def _js_edges(repo, tree, dirs, counter, stats):
+def _js_edges(store, tree, dirs, counter, stats):
     """Relative imports resolve directly; non-relative specifiers go through
     the nearest tsconfig/jsconfig's `paths` aliases and `baseUrl`, then
     workspace package names (bare third-party imports match nothing in
     either and drop out). Alias imports whose pattern matched but whose
     targets ground nowhere are counted in stats — that is silent coverage
     loss otherwise."""
-    configs = _js_configs(repo, tree)
-    workspaces = _js_workspaces(repo, tree)
+    configs = _js_configs(store, tree)
+    workspaces = _js_workspaces(store, tree)
     for rel, files in tree.items():
         cfg = _owning_root(rel, configs) if configs else None
         for f in files:
             if not f.endswith(JS_EXTS) or f.endswith(".d.ts"):
                 continue
-            for imp in JS_IMPORT_RE.findall(_read(repo, rel, f)):
+            for imp in store.facts(rel, f).get("js_imports", ()):
                 if imp.startswith("."):
                     target = _existing_dir(_norm(os.path.join(rel, imp)), dirs)
                 elif imp.startswith("/"):
@@ -206,7 +174,7 @@ def _js_edges(repo, tree, dirs, counter, stats):
                     counter[(rel, target, "JS/TS")] += 1
 
 
-def _js_configs(repo, tree):
+def _js_configs(store, tree):
     """{config dir: (paths_base, patterns, bare_base)} from tsconfig/jsconfig.
 
     paths_base: dir that `paths` values resolve against — baseUrl when set,
@@ -223,7 +191,7 @@ def _js_configs(repo, tree):
         name = next((c for c in JS_CONFIG_FILES if c in files), None)
         if name is None:
             continue
-        data = _jsonc_loads(_read(repo, rel, name))
+        data = _jsonc_loads(store.text(rel, name))
         opts = data.get("compilerOptions") if isinstance(data, dict) else None
         if not isinstance(opts, dict):
             continue
@@ -284,7 +252,7 @@ def _js_alias_resolve(imp, cfg, dirs):
     return None, matched
 
 
-def _js_workspaces(repo, tree):
+def _js_workspaces(store, tree):
     """{package name: workspace dir} for monorepo workspaces.
 
     Globs come from package.json `workspaces` (npm/yarn; array or
@@ -297,14 +265,14 @@ def _js_workspaces(repo, tree):
     for rel, files in tree.items():
         globs = []
         if "package.json" in files:
-            data = _jsonc_loads(_read(repo, rel, "package.json"))
+            data = _jsonc_loads(store.text(rel, "package.json"))
             ws = data.get("workspaces") if isinstance(data, dict) else None
             if isinstance(ws, dict):
                 ws = ws.get("packages")
             if isinstance(ws, list):
                 globs.extend(g for g in ws if isinstance(g, str))
         if "pnpm-workspace.yaml" in files:
-            globs.extend(_pnpm_globs(_read(repo, rel, "pnpm-workspace.yaml")))
+            globs.extend(_pnpm_globs(store.text(rel, "pnpm-workspace.yaml")))
         for g in globs:
             if g.startswith("!"):  # negation globs: rare, not modeled
                 continue
@@ -314,7 +282,7 @@ def _js_workspaces(repo, tree):
                     continue
                 if not _segments_match(pat, wdir.split("/")):
                     continue
-                pkg = _jsonc_loads(_read(repo, wdir, "package.json"))
+                pkg = _jsonc_loads(store.text(wdir, "package.json"))
                 name = pkg.get("name") if isinstance(pkg, dict) else None
                 if isinstance(name, str) and name:
                     names[name] = wdir
@@ -424,7 +392,7 @@ def _jsonc_string_end(text, i):
 
 # -- Rust --------------------------------------------------------------------
 
-def _rust_edges(repo, tree, counter):
+def _rust_edges(store, tree, counter):
     """Crate-level edges from `use <crate>::...` declarations.
 
     Crates are discovered from every Cargo.toml carrying a [package] name —
@@ -438,7 +406,7 @@ def _rust_edges(repo, tree, counter):
     for rel, files in tree.items():
         if "Cargo.toml" not in files:
             continue
-        pkg = CARGO_PACKAGE_RE.search(_read(repo, rel, "Cargo.toml"))
+        pkg = CARGO_PACKAGE_RE.search(store.text(rel, "Cargo.toml"))
         if not pkg:
             continue  # virtual workspace manifest (no [package])
         name = CARGO_NAME_RE.search(pkg.group(1))
@@ -454,18 +422,19 @@ def _rust_edges(repo, tree, counter):
         for f in files:
             if not f.endswith(".rs"):
                 continue
-            src = _read(repo, rel, f)
-            for seg in RUST_USE_RE.findall(src):
+            rec = store.facts(rel, f)
+            for seg in rec.get("rust_roots", ()):
                 if seg in RUST_SKIP:
                     continue
                 target = crates.get(seg)
                 if target is not None and target != owner and target != rel:
                     counter[(rel, target, "Rust")] += 1
             if owner is not None:
-                _rust_crate_paths(rel, owner, src, tree, counter)
+                _rust_crate_paths(rel, owner, rec.get("rust_paths", ()),
+                                  tree, counter)
 
 
-def _rust_crate_paths(rel, owner, src, tree, counter):
+def _rust_crate_paths(rel, owner, use_paths, tree, counter):
     """Dir-level edges for `use crate::...` inside the owning crate's src/ tree.
 
     Only files under <crate>/src use `crate::` to mean the lib/bin root —
@@ -477,7 +446,7 @@ def _rust_crate_paths(rel, owner, src, tree, counter):
         return
     if rel != src_root and not rel.startswith(src_root + "/"):
         return
-    for path, group in RUST_USE_PATH_RE.findall(src):
+    for path, group in use_paths:
         segments = [s for s in path.split("::") if s]
         if not segments or segments[0] != "crate":
             continue
@@ -517,11 +486,11 @@ def _jvm_modules(tree):
                   if any(b in files for b in JVM_BUILD_FILES))
 
 
-def _jvm_edges(repo, tree, counter):
+def _jvm_edges(store, tree, counter):
     """Java/Kotlin edges: imports resolved against the package-declaration
     index by longest package prefix. Externals (java.*, kotlin.*, third-party)
     are never in the index, so they drop out naturally."""
-    index = _jvm_package_index(repo, tree)
+    index = _jvm_package_index(store, tree)
     if not index:
         return
     for rel, files in tree.items():
@@ -529,7 +498,7 @@ def _jvm_edges(repo, tree, counter):
             if not f.endswith(JVM_EXTS):
                 continue
             lang = "Kotlin" if f.endswith(".kt") else "Java"
-            for path in JVM_IMPORT_RE.findall(_read(repo, rel, f)):
+            for path in store.facts(rel, f).get("jvm_imports", ()):
                 dirs = _jvm_resolve(path.rstrip("."), index)
                 for target in _jvm_prefer_main(dirs):
                     if target != rel:
@@ -560,7 +529,7 @@ def _jvm_prefer_main(dirs):
     return sorted(main) or sorted(dirs)
 
 
-def _jvm_package_index(repo, tree):
+def _jvm_package_index(store, tree):
     """{package name -> set of dirs declaring it}, from `package` declarations.
 
     Declarations are language-level ground truth: they work for standard
@@ -574,9 +543,9 @@ def _jvm_package_index(repo, tree):
         for f in files:
             if not f.endswith(JVM_EXTS):
                 continue
-            m = JVM_PACKAGE_RE.search(_read(repo, rel, f))
-            if m:
-                index.setdefault(m.group(1), set()).add(rel)
+            pkg = store.facts(rel, f).get("jvm_package")
+            if pkg:
+                index.setdefault(pkg, set()).add(rel)
     return index
 
 
