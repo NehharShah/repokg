@@ -206,6 +206,29 @@ class TestInvalidation(CacheCase):
         self.backdate("pkg/a.py")
         self.assert_warm_matches_cold(1)
 
+    def test_git_catches_a_change_the_stat_gate_cannot_see(self):
+        """The reason both gates exist.
+
+        Rewriting a file to the same length and restoring its mtime leaves the
+        stat gate no signal at all, which is not a contrived situation: an
+        rsync with -t, a tar extraction, or a CI job restoring a cached
+        working tree all preserve mtimes across content changes. Committing it
+        puts the path in `git diff` against the commit the cache was written
+        at, and that is what forces the re-parse.
+        """
+        self.scan()
+        path = os.path.join(self.repo, "pkg/a.py")
+        before = os.stat(path)
+        write(self.repo, "pkg/a.py", "import io\n")  # same length as import os
+        git(self.repo, "commit", "-qam", "same size")
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        entry = self.doc()["files"]["pkg/a.py"]
+        self.assertEqual(entry["size"], os.stat(path).st_size)
+        self.assertEqual(entry["mtime_ns"], os.stat(path).st_mtime_ns)
+        self.assert_warm_matches_cold(1)
+        self.assertEqual(self.doc()["files"]["pkg/a.py"]["facts"]["py_imports"],
+                         [["io", 0]])
+
     def test_gitignored_file_is_caught_by_the_stat_gate(self):
         """repokg walks paths git ignores, so git alone cannot invalidate."""
         write(self.repo, "gen/x.py", "import os\n")
@@ -263,6 +286,19 @@ class TestRecordOrdering(CacheCase):
         self.assertEqual(self.doc()["files"]["gen/x.py"]["facts"]["loc"], 1)
         self.assert_warm_matches_cold(1)
         self.assertEqual(self.doc()["files"]["gen/x.py"]["facts"]["loc"], 3)
+
+    def test_reverting_an_edit_discards_the_edits_facts(self):
+        """A scan taken while a file was dirty recorded facts for the edit.
+        Reverting must not leave those facts standing as the file's own."""
+        self.scan()
+        write(self.repo, "pkg/a.py", "import os\nimport sys\nimport json\n")
+        self.scan()
+        self.assertEqual(self.doc()["files"]["pkg/a.py"]["facts"]["loc"], 3)
+        git(self.repo, "checkout", "--", "pkg/a.py")
+        self.assert_warm_matches_cold(1)
+        self.assertEqual(self.doc()["files"]["pkg/a.py"]["facts"],
+                         {"lang": "Python", "loc": 1,
+                          "py_imports": [["os", 0]]})
 
 
 class TestDegradation(CacheCase):
