@@ -72,7 +72,37 @@ timeline eras, and gotchas alongside the deterministic structure.
 | `repokg check [path]` | Exit 1 if the knowledge graph is stale vs `HEAD` (CI-friendly) |
 
 Flags: `--out DIR` (default `<repo>/.repokg`), `--md FILE` (default `<repo>/KNOWLEDGE_GRAPH.md`),
-`--exclude PATTERN` (repeatable), `--no-github`, `--pr-limit N`, `--diff`, `--json`.
+`--exclude PATTERN` (repeatable), `--no-github`, `--no-cache`, `--pr-limit N`, `--diff`, `--json`.
+
+### Incremental scans
+
+`scan` caches what it extracted from each file in `.repokg/cache.json` and replays
+it for files that have not changed, so a re-scan only parses what moved:
+
+```
+$ repokg scan .
+cache: cold (no cache yet) — parsed 431 files
+$ repokg scan .
+cache: replayed 431 of 431 files, parsed 0
+$ vim src/app.py && repokg scan .
+cache: replayed 430 of 431 files, parsed 1
+```
+
+A file is replayed only when `git` has not flagged it — `git diff` against the
+commit the cache was written at, plus `git status` for anything dirty, staged, or
+untracked — **and** its size and mtime still match what was recorded. The second
+check is what covers the files git cannot speak for: anything in `.gitignore`
+that repokg still walks, submodule contents, or a directory that is not a git
+checkout at all.
+
+The cache is an optimization and nothing else. Output is identical either way
+(a test enforces byte-for-byte equality), a missing or unreadable or unusable
+cache degrades to a full scan and says so on stdout, and `--no-cache` forces one.
+`repokg clean` removes it with everything else.
+
+One caveat, shared with every build tool that trusts `stat`: a file rewritten
+with its size and modification time preserved is invisible to both checks. Use
+`--no-cache` if you have reason to think that happened.
 
 ### Excluding paths
 
@@ -176,12 +206,16 @@ schema — everything else stays deterministic and reproducible.
   declared only in test roots, edges resolve there.
 - Branch `ahead` counts use one batched git call on git ≥ 2.41, with a
   per-branch fallback on older git.
+- **Incremental scans** cache per-file facts, not repo metadata: `go.mod`,
+  `Cargo.toml`, `tsconfig.json`, `package.json` and `pnpm-workspace.yaml` are
+  re-read every scan (one per package, against one read per source file).
 
 ## Roadmap
 
 - [x] Rust import graph
 - [x] Java / Kotlin import graphs
 - [x] `--exclude` glob patterns + `.repokgignore`
+- [x] Incremental scan cache for large monorepos
 - [ ] `llms.txt` emission alongside KNOWLEDGE_GRAPH.md
 - [x] tsconfig `paths` alias + workspace package resolution
 - [ ] PyPI release + prebuilt GitHub Action
