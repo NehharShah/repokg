@@ -70,9 +70,62 @@ timeline eras, and gotchas alongside the deterministic structure.
 | `repokg audit [path]` | Show every *inferred* conclusion with confidence + evidence (`--json` for machines) |
 | `repokg clean [path]` | Remove everything repokg authored — never touches your content (`--diff` for dry run) |
 | `repokg check [path]` | Exit 1 if the knowledge graph is stale vs `HEAD` (CI-friendly) |
+| `repokg diff [path]` | Report what changed between two graphs; exit 1 if the shape changed |
 
 Flags: `--out DIR` (default `<repo>/.repokg`), `--md FILE` (default `<repo>/KNOWLEDGE_GRAPH.md`),
-`--exclude PATTERN` (repeatable), `--no-github`, `--no-cache`, `--pr-limit N`, `--diff`, `--json`.
+`--exclude PATTERN` (repeatable), `--no-github`, `--no-cache`, `--pr-limit N`, `--diff`, `--json`,
+`--from KG.JSON`, `--to KG.JSON`, `--format text|json|md`.
+
+### Structural diff
+
+`check` answers "is the graph stale?". `diff` answers what actually changed:
+
+```
+$ repokg diff .
+comparing two graphs of 46e6f96f1a2b (the same commit)
+
+modules  +1 ~1
+  + billing                    Python, 4 files, 212 lines
+  ~ api                        loc 980 -> 1044
+
+edges  +1
+  + api -> billing (Python)    3 imports
+
+languages  ~1
+  ~ Python                     files 120 -> 124, loc 18400 -> 18612
+
+shape changed: modules, edges (exit 1)
+```
+
+That new edge is the point — "this adds a dependency from `api/` to `billing/`,
+intentional?" is the review comment a raw file diff will not give you.
+
+With no arguments it compares the graph the last scan left in `.repokg/kg.json`
+against a fresh scan. **The stored graph is never written over** — it is the
+baseline, so saving over it would destroy the answer to the next question.
+(`.repokg/cache.json` is still updated, since it records what each file
+contained rather than what the graph concluded, and is what keeps the scan
+feeding the diff fast. `repokg clean` removes it either way.) Point `--from` and
+`--to` at saved graphs to compare two of them without scanning at all.
+
+`--format md` emits a report ready to paste into a PR comment, and `--format
+json` prints the whole delta keyed by record, uncapped, with scan progress moved
+to stderr so it stays pipeable.
+
+**Exit codes** follow `diff(1)` and `git diff --exit-code`: **0** unchanged,
+**1** the shape changed, **2** error. Shape means the *membership* of modules,
+edges, languages and the ops surface — a module or dependency appearing or
+disappearing, or a module switching primary language. LOC drift, import counts,
+branch tips and PR states are all reported but deliberately do not move the exit
+code, because they change on essentially every commit and a gate that fired
+every time would be switched off within a week.
+
+Not everything that differs is reported, either. A branch's tip, date and commit
+subject move whenever anyone pushes, so comparing them would bury the
+transitions that matter — a branch going stale, or merging — under noise from
+unrelated work. A section recorded by only one of the two graphs is skipped and
+noted rather than reported as wholly added, since a version gap is not an
+architectural change.
 
 ### Incremental scans
 
@@ -178,6 +231,16 @@ Keep it fresh in CI:
 
 ```yaml
 - run: pipx run repokg check . || echo "::warning::KNOWLEDGE_GRAPH.md is stale"
+```
+
+Or surface the architectural change a PR makes, which is what the three exit
+codes are for — a mistyped path must not read as a new dependency:
+
+```yaml
+- run: |
+    rc=0; pipx run repokg diff . --format md > diff.md || rc=$?
+    if [ "$rc" -gt 1 ]; then exit "$rc"; fi   # 2 = the diff failed, not the graph
+    if [ "$rc" -eq 1 ]; then cat diff.md >> "$GITHUB_STEP_SUMMARY"; fi
 ```
 
 KNOWLEDGE_GRAPH.md itself also lists any agent-context files it found, so an agent landing

@@ -1,4 +1,5 @@
-"""repokg CLI: scan | prompts | render | generate | inject | audit | clean | check."""
+"""repokg CLI: scan | prompts | render | generate | inject | audit | clean |
+check | diff."""
 
 import argparse
 import datetime
@@ -7,11 +8,24 @@ import json
 import os
 import sys
 
-from . import (__version__, cache, code, deps, facts, findings, github,
+from . import (__version__, cache, code, deps, diff, facts, findings, github,
                gitinfo, inject, markdown, ops, prompts, validate)
 
 
-def scan(repo, out, no_github, pr_limit, exclude=(), use_cache=True):
+def build_graph(repo, out, no_github, pr_limit, exclude=(), use_cache=True,
+                stream=None):
+    """Assemble the knowledge graph and return it, without writing kg.json.
+
+    `scan` writes what this returns. `diff` cannot: the document already in
+    <out> is the baseline it compares against, so writing over it would
+    destroy the answer to the next question asked.
+
+    Progress lines go to `stream` (stdout by default). `diff` sends them to
+    stderr instead, so that `--format json` stays pipeable while the scan
+    still says out loud what it excluded — coverage loss has to be visible
+    wherever the scan happens.
+    """
+    stream = stream if stream is not None else sys.stdout
     info, branches = gitinfo.collect(repo)
     if no_github:
         prs, note = [], "GitHub lookup disabled (--no-github)"
@@ -47,19 +61,26 @@ def scan(repo, out, no_github, pr_limit, exclude=(), use_cache=True):
         "ops": ops.collect(repo, tree),
     }
     kg["findings"], kg["uncertainty"] = findings.build(kg)
-    os.makedirs(out, exist_ok=True)
-    path = os.path.join(out, "kg.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(kg, f, indent=1)
     if scan_cache is not None:
         scan_cache.save(out, info["head"])
     excl = kg["exclude"]
     if excl["dirs"] or excl["files"]:
         print("excluded %d dirs, %d files (%d exclude patterns)" %
-              (excl["dirs"], excl["files"], len(excl["patterns"])))
-    print(_cache_line(scan_cache, cache_note, store))
+              (excl["dirs"], excl["files"], len(excl["patterns"])),
+              file=stream)
+    print(_cache_line(scan_cache, cache_note, store), file=stream)
+    return kg
+
+
+def scan(repo, out, no_github, pr_limit, exclude=(), use_cache=True):
+    kg = build_graph(repo, out, no_github, pr_limit, exclude, use_cache)
+    os.makedirs(out, exist_ok=True)
+    path = os.path.join(out, "kg.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(kg, f, indent=1)
     print("wrote %s (%d modules, %d edges, %d branches, %d PRs)" %
-          (path, len(modules), len(kg["edges"]), len(branches), len(prs)))
+          (path, len(kg["modules"]), len(kg["edges"]), len(kg["branches"]),
+           len(kg["prs"])))
     return kg
 
 
@@ -165,13 +186,88 @@ def check(repo, out, md):
     return 0
 
 
+def do_diff(repo, out, from_graph, to_graph, fmt, no_github, pr_limit,
+            exclude=(), use_cache=True):
+    """Report what changed between two knowledge graphs.
+
+    Exit 0 when the graph's shape is unchanged, 1 when it changed, 2 on
+    error — the `diff(1)` and `git diff --exit-code` convention, and the one
+    `repokg check` already follows by returning 1 for a stale graph. Errors
+    are 2 rather than 1 so that a CI job cannot read a mistyped path as an
+    architectural change.
+
+    Shape means the module, edge, language and ops-surface membership of the
+    graph. LOC drift, edge weight and branch churn are all reported but none
+    of them move the exit code: they change on essentially every commit, and
+    a gate that fired every time would be switched off within a week.
+
+    The graph is never written. The baseline is the document in <out>, so a
+    scan that saved over it would leave the next run with nothing to compare
+    against. <out>/cache.json is still updated when a scan runs — it records
+    what each file contained, not what the graph concluded, and is what keeps
+    the scan that feeds this fast.
+    """
+    if from_graph:
+        old = _load_graph(from_graph, "baseline", "")
+    else:
+        old = _load_graph(os.path.join(out, "kg.json"), "baseline",
+                          " (run `repokg scan` first, or point --from at one)")
+    if old is None:
+        return 2
+    if to_graph:
+        new = _load_graph(to_graph, "comparison", "")
+        if new is None:
+            return 2
+    else:
+        try:
+            # progress lines to stderr: stdout is the report, and may be piped
+            new = build_graph(repo, out, no_github, pr_limit, exclude,
+                              use_cache, stream=sys.stderr)
+        except (RuntimeError, OSError) as e:
+            # A scan that cannot run is an error, not an architectural change.
+            # main() maps these to 1, and 1 is precisely what a CI job reads
+            # as "the shape moved" — the collision the three codes exist to
+            # avoid, so it has to be caught here rather than there.
+            print("error: cannot scan %s to compare against: %s" % (repo, e),
+                  file=sys.stderr)
+            return 2
+    delta = diff.build(old, new)
+    if fmt == "json":
+        print(json.dumps(delta, indent=1))
+    elif fmt == "md":
+        sys.stdout.write(diff.render_markdown(delta))
+    else:
+        print(diff.render_text(delta))
+    return 1 if delta["shape_changed"] else 0
+
+
+def _load_graph(path, role, hint):
+    """A kg.json document, or None having said on stderr why not."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            kg = json.load(f)
+    except FileNotFoundError:
+        print("error: no %s graph at %s%s" % (role, path, hint),
+              file=sys.stderr)
+        return None
+    except (OSError, ValueError) as e:
+        print("error: %s is not a readable knowledge graph: %s" % (path, e),
+              file=sys.stderr)
+        return None
+    if not isinstance(kg, dict):
+        print("error: %s is not a knowledge graph document" % path,
+              file=sys.stderr)
+        return None
+    return kg
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="repokg",
         description="Generate an AI-ready knowledge graph of a codebase.")
     ap.add_argument("command", nargs="?", default="generate",
                     choices=["scan", "prompts", "render", "generate", "inject",
-                             "audit", "clean", "check", "version"],
+                             "audit", "clean", "check", "diff", "version"],
                     help="scan: extract structure to .repokg/kg.json | "
                          "prompts: write the AI enrichment prompt | "
                          "render: kg.json (+narratives.json) -> KNOWLEDGE_GRAPH.md | "
@@ -179,7 +275,9 @@ def main(argv=None):
                          "inject: add knowledge-graph pointer to CLAUDE.md/AGENTS.md/cursor rules | "
                          "audit: show inferred conclusions with confidence + evidence | "
                          "clean: remove everything repokg authored | "
-                         "check: exit 1 if knowledge graph is stale vs HEAD")
+                         "check: exit 1 if knowledge graph is stale vs HEAD | "
+                         "diff: report what changed between two graphs, "
+                         "exit 1 if the shape changed")
     ap.add_argument("path", nargs="?", default=".", help="repository path (default: .)")
     ap.add_argument("--out", default=None, help="output dir (default: <repo>/.repokg)")
     ap.add_argument("--md", default=None, help="markdown output (default: <repo>/KNOWLEDGE_GRAPH.md)")
@@ -197,7 +295,18 @@ def main(argv=None):
     ap.add_argument("--pr-limit", type=int, default=1000, help="max PRs to fetch (default 1000)")
     ap.add_argument("--diff", action="store_true",
                     help="inject/clean: dry run, print what would change")
-    ap.add_argument("--json", action="store_true", help="audit: machine-readable output")
+    ap.add_argument("--json", action="store_true", help="audit/diff: machine-readable output")
+    ap.add_argument("--from", dest="from_graph", metavar="KG.JSON",
+                    help="diff: baseline graph (default: <out>/kg.json, i.e. "
+                         "what the last scan left there)")
+    ap.add_argument("--to", dest="to_graph", metavar="KG.JSON",
+                    help="diff: graph to compare against (default: a fresh "
+                         "scan, which is not written to disk)")
+    ap.add_argument("--format", dest="fmt", choices=["text", "json", "md"],
+                    default=None,
+                    help="diff: report format (default text; md is ready to "
+                         "paste into a PR comment). `--md` is already the "
+                         "markdown *output path*, hence --format")
     args = ap.parse_args(argv)
 
     if args.command == "version":
@@ -229,6 +338,11 @@ def main(argv=None):
             do_clean(repo, out, md, diff=args.diff)
         elif args.command == "check":
             return check(repo, out, md)
+        elif args.command == "diff":
+            return do_diff(repo, out, args.from_graph, args.to_graph,
+                           args.fmt or ("json" if args.json else "text"),
+                           args.no_github, args.pr_limit, exclude,
+                           not args.no_cache)
         else:  # generate
             scan(repo, out, args.no_github, args.pr_limit, exclude,
                  not args.no_cache)
