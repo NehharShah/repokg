@@ -201,8 +201,11 @@ def do_diff(repo, out, from_graph, to_graph, fmt, no_github, pr_limit,
     of them move the exit code: they change on essentially every commit, and
     a gate that fired every time would be switched off within a week.
 
-    Nothing is written. The baseline is the document in <out>, so a scan that
-    saved over it would leave the next run with nothing to compare against.
+    The graph is never written. The baseline is the document in <out>, so a
+    scan that saved over it would leave the next run with nothing to compare
+    against. <out>/cache.json is still updated when a scan runs — it records
+    what each file contained, not what the graph concluded, and is what keeps
+    the scan that feeds this fast.
     """
     if from_graph:
         old = _load_graph(from_graph, "baseline", "")
@@ -216,9 +219,18 @@ def do_diff(repo, out, from_graph, to_graph, fmt, no_github, pr_limit,
         if new is None:
             return 2
     else:
-        # progress lines to stderr: stdout is the report, which may be piped
-        new = build_graph(repo, out, no_github, pr_limit, exclude, use_cache,
-                          stream=sys.stderr)
+        try:
+            # progress lines to stderr: stdout is the report, and may be piped
+            new = build_graph(repo, out, no_github, pr_limit, exclude,
+                              use_cache, stream=sys.stderr)
+        except (RuntimeError, OSError) as e:
+            # A scan that cannot run is an error, not an architectural change.
+            # main() maps these to 1, and 1 is precisely what a CI job reads
+            # as "the shape moved" — the collision the three codes exist to
+            # avoid, so it has to be caught here rather than there.
+            print("error: cannot scan %s to compare against: %s" % (repo, e),
+                  file=sys.stderr)
+            return 2
     delta = diff.build(old, new)
     if fmt == "json":
         print(json.dumps(delta, indent=1))

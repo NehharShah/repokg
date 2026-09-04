@@ -155,6 +155,19 @@ class TestExitCodes(DiffCase):
         self.assertEqual(rc, 2)
         self.assertIn("not a readable knowledge graph", stderr)
 
+    def test_a_scan_that_cannot_run_exits_two_not_one(self):
+        """The collision the three codes exist to prevent. `main` maps a
+        failed scan to 1, and 1 is what a CI job reads as "the shape moved" —
+        so a directory that is not a checkout would have posted a bogus
+        "architecture changed" rather than reporting a broken run.
+        """
+        self.seed()
+        shutil.rmtree(os.path.join(self.repo, ".git"))
+        rc, stdout, stderr = self.diff()
+        self.assertEqual(rc, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("cannot scan", stderr)
+
     def test_a_json_document_that_is_not_a_graph_exits_two(self):
         self.seed()
         write(self.tmp, "list.json", "[1, 2, 3]")
@@ -188,13 +201,26 @@ class TestNonDestructive(DiffCase):
         self.assertEqual(first[0], 1)
         self.assertEqual(json.loads(first[1]), json.loads(second[1]))
 
-    def test_diff_writes_no_new_artifact(self):
-        """Nothing to teach `repokg clean` about, which is the reversibility
-        rule met by writing nothing in the first place."""
+    def test_diff_writes_no_new_kind_of_artifact(self):
+        """Nothing new for `repokg clean` to learn about."""
         self.seed()
         before = sorted(os.listdir(self.out))
         self.diff()
         self.assertEqual(sorted(os.listdir(self.out)), before)
+
+    def test_the_only_thing_a_diff_writes_is_the_scan_cache(self):
+        """Precision about "writes nothing": the *graph* is never written,
+        which is what makes the baseline stable. The cache is, because it
+        records what each file contained rather than what the graph concluded,
+        and it is what keeps the scan feeding the diff fast."""
+        self.seed()
+        saved = os.path.join(self.tmp, "saved.json")
+        shutil.copy(os.path.join(self.out, "kg.json"), saved)
+        shutil.rmtree(self.out)
+        rc, _, _ = self.diff("--from", saved)
+        self.assertEqual(rc, 0)
+        self.assertEqual(sorted(os.listdir(self.out)), ["cache.json"])
+        self.assertFalse(os.path.exists(os.path.join(self.out, "kg.json")))
 
     def test_two_explicit_graphs_do_not_scan_at_all(self):
         self.seed()

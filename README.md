@@ -101,10 +101,12 @@ That new edge is the point — "this adds a dependency from `api/` to `billing/`
 intentional?" is the review comment a raw file diff will not give you.
 
 With no arguments it compares the graph the last scan left in `.repokg/kg.json`
-against a fresh scan. **Nothing is written**: that stored document is the
-baseline, so saving over it would destroy the answer to the next question. Point
-`--from` and `--to` at saved graphs to compare two of them without scanning at
-all.
+against a fresh scan. **The stored graph is never written over** — it is the
+baseline, so saving over it would destroy the answer to the next question.
+(`.repokg/cache.json` is still updated, since it records what each file
+contained rather than what the graph concluded, and is what keeps the scan
+feeding the diff fast. `repokg clean` removes it either way.) Point `--from` and
+`--to` at saved graphs to compare two of them without scanning at all.
 
 `--format md` emits a report ready to paste into a PR comment, and `--format
 json` prints the whole delta keyed by record, uncapped, with scan progress moved
