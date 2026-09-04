@@ -74,7 +74,7 @@ timeline eras, and gotchas alongside the deterministic structure.
 
 Flags: `--out DIR` (default `<repo>/.repokg`), `--md FILE` (default `<repo>/KNOWLEDGE_GRAPH.md`),
 `--exclude PATTERN` (repeatable), `--no-github`, `--no-cache`, `--pr-limit N`, `--diff`, `--json`,
-`--from KG.JSON`, `--to KG.JSON`, `--format text|json|md`.
+`--from KG.JSON`, `--to KG.JSON`, `--format text|json|md`, `--no-renames`.
 
 ### Structural diff
 
@@ -126,6 +126,29 @@ transitions that matter — a branch going stale, or merging — under noise fro
 unrelated work. A section recorded by only one of the two graphs is skipped and
 noted rather than reported as wholly added, since a version gap is not an
 architectural change.
+
+#### Moved modules
+
+A module is identified by its path, so moving one reads as a removal plus an
+addition. Pairing those back up is the diff's only heuristic, and it says so:
+
+```
+modules  R1
+  R lib -> shared    high, 1 of 1 imports across unmoved modules preserved
+```
+
+The evidence is the **import neighbourhood**, not size similarity — a moved
+module keeps its dependencies, whereas two modules having a similar line count
+is a coincidence waiting to happen. Confidence is `high` when every import to
+and from the unmoved parts of the graph survived, `medium` when most did or the
+directory name is unchanged, and `low` when the name is the only thing matching.
+An ambiguous pairing — a module split in two, or two candidates for one move —
+is not reported at all, and a language change is never a rename.
+
+The pair stays in `added` and `removed` as well, so a consumer that distrusts
+the pairing can ignore it and see exactly what it would have seen otherwise.
+`--no-renames` turns it off. A rename still exits 1: no dependency changed, but
+every path a doc, an agent or a CODEOWNERS entry referenced did.
 
 ### Incremental scans
 
@@ -209,6 +232,11 @@ as findings with confidence and evidence, surfaced by `repokg audit`:
 [modules]
   4 flagged generated     low     path-name heuristic; verify before excluding
 ```
+
+`repokg diff` carries the same discipline. Its one heuristic — pairing a removed
+module with an added one to call it a move — reports the confidence it matched
+at and the evidence for it inline, refuses ambiguous pairings outright, and can
+be turned off with `--no-renames`.
 
 Agent-written `narratives.json` is schema-validated before rendering — malformed
 enrichment fails loudly with errors precise enough for the agent to self-correct.
@@ -295,6 +323,7 @@ schema — everything else stays deterministic and reproducible.
 - [x] Java / Kotlin import graphs
 - [x] `--exclude` glob patterns + `.repokgignore`
 - [x] Incremental scan cache for large monorepos
+- [x] `repokg diff` — structural diff between two scans
 - [ ] `llms.txt` emission alongside KNOWLEDGE_GRAPH.md
 - [x] tsconfig `paths` alias + workspace package resolution
 - [ ] PyPI release + prebuilt GitHub Action
