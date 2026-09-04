@@ -187,7 +187,7 @@ def check(repo, out, md):
 
 
 def do_diff(repo, out, from_graph, to_graph, fmt, no_github, pr_limit,
-            exclude=(), use_cache=True):
+            exclude=(), use_cache=True, detect_renames=True):
     """Report what changed between two knowledge graphs.
 
     Exit 0 when the graph's shape is unchanged, 1 when it changed, 2 on
@@ -200,6 +200,11 @@ def do_diff(repo, out, from_graph, to_graph, fmt, no_github, pr_limit,
     graph. LOC drift, edge weight and branch churn are all reported but none
     of them move the exit code: they change on essentially every commit, and
     a gate that fired every time would be switched off within a week.
+
+    A module that moved reads as a removal plus an addition, and the pairing
+    between the two is recovered heuristically — reported with the confidence
+    it was matched at, and turned off entirely by `--no-renames`. It changes
+    how the report reads and never what the diff found or what it exits.
 
     The graph is never written. The baseline is the document in <out>, so a
     scan that saved over it would leave the next run with nothing to compare
@@ -231,7 +236,7 @@ def do_diff(repo, out, from_graph, to_graph, fmt, no_github, pr_limit,
             print("error: cannot scan %s to compare against: %s" % (repo, e),
                   file=sys.stderr)
             return 2
-    delta = diff.build(old, new)
+    delta = diff.build(old, new, detect_renames)
     if fmt == "json":
         print(json.dumps(delta, indent=1))
     elif fmt == "md":
@@ -302,6 +307,10 @@ def main(argv=None):
     ap.add_argument("--to", dest="to_graph", metavar="KG.JSON",
                     help="diff: graph to compare against (default: a fresh "
                          "scan, which is not written to disk)")
+    ap.add_argument("--no-renames", action="store_true",
+                    help="diff: report a moved module as a plain addition and "
+                         "removal instead of pairing the two, which is the "
+                         "one heuristic in the diff")
     ap.add_argument("--format", dest="fmt", choices=["text", "json", "md"],
                     default=None,
                     help="diff: report format (default text; md is ready to "
@@ -342,7 +351,7 @@ def main(argv=None):
             return do_diff(repo, out, args.from_graph, args.to_graph,
                            args.fmt or ("json" if args.json else "text"),
                            args.no_github, args.pr_limit, exclude,
-                           not args.no_cache)
+                           not args.no_cache, not args.no_renames)
         else:  # generate
             scan(repo, out, args.no_github, args.pr_limit, exclude,
                  not args.no_cache)

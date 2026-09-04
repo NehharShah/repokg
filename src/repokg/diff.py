@@ -36,6 +36,7 @@ dicts, so a diff stays reproducible from two saved documents forever.
 """
 
 import re
+from collections import Counter
 
 # Sections that diff as keyed record lists: the fields identifying a record,
 # then the fields whose movement is reported. Anything unlisted is ignored on
@@ -73,10 +74,21 @@ MAX_ROWS = 40
 # Order the report reads in: what the architecture is, then what surrounds it.
 ORDER = ("modules", "edges", "languages", "ops", "branches", "prs")
 
+# Rename detection is quadratic in the candidates, and a repo-wide
+# reorganisation is both the case that blows the pair count up and the case
+# where pairing is least trustworthy. Past this many pairs it is skipped and
+# said so, rather than run slowly to produce guesses.
+MAX_RENAME_PAIRS = 10000
+
+# Confidence tiers for a rename, strongest first. Each is a rule, not a score:
+# a tuned similarity threshold is not something anyone could defend in review,
+# and these can each be stated in a sentence.
+RENAME_TIERS = ("high", "medium", "low")
+
 _DIGITS_RE = re.compile(r"(\d+)")
 
 
-def build(old, new):
+def build(old, new, detect_renames=True):
     """Return the delta taking knowledge graph `old` to `new`.
 
     Both arguments are kg.json documents as dicts. Neither is mutated, and
@@ -85,12 +97,19 @@ def build(old, new):
     Top-level sections are always present even when empty, so a consumer can
     index them without guarding. `ops` is the exception: its keys vary by repo
     and most are empty in any given one, so only those that moved appear.
+
+    `detect_renames` pairs removed modules with added ones — see `_renames`.
+    It only ever adds a `modules.renamed` list; the paired modules stay in
+    `added` and `removed`, so turning it off changes what the report says and
+    nothing about what the diff found.
     """
     notes = []
     delta = {"old": _provenance(old), "new": _provenance(new), "notes": notes}
     for name, identity, fields in SECTIONS:
         delta[name] = _section(old, new, name, identity, fields, notes)
     delta["ops"] = _ops(old, new, notes)
+    delta["modules"]["renamed"] = \
+        _renames(old, new, delta, notes) if detect_renames else []
     ov, nv = old.get("repokg_version"), new.get("repokg_version")
     if ov != nv:
         notes.append(
@@ -216,6 +235,137 @@ def _ops(old, new, notes):
     return out
 
 
+# -- rename detection --------------------------------------------------------
+#
+# The one heuristic in the diff, and the only thing here that can be wrong
+# rather than merely incomplete. A module is keyed by its path, so moving one
+# reads as a removal plus an addition; recovering the pairing is guesswork and
+# is treated as such — every rename carries the confidence tier it was matched
+# at and the evidence for it, and an ambiguous pairing is not reported at all.
+#
+# The evidence is the *import neighbourhood*, not size similarity. A renamed
+# module keeps its dependencies: everything it imported still imports, and
+# everything that imported it still does. Two modules having a similar line
+# count is a coincidence waiting to happen, and pairing on it would be exactly
+# the sort of guessed fact this project refuses to emit.
+
+def _renames(old, new, delta, notes):
+    """Pair removed modules with added ones where the evidence supports it.
+
+    Returns [{from, to, confidence, evidence}], sorted by source path.
+
+    A pairing is accepted only when it is unambiguous: the two must be each
+    other's sole candidate at their tier. A module split in two, or two
+    modules that both look like the same move, produce no rename rather than
+    an arbitrary pick — a wrong pairing would claim a dependency survived a
+    refactor when it did not, which is worse than saying nothing.
+    """
+    removed = [m for m in delta["modules"]["removed"] if isinstance(m, dict)]
+    added = [m for m in delta["modules"]["added"] if isinstance(m, dict)]
+    if not removed or not added:
+        return []
+    if len(removed) * len(added) > MAX_RENAME_PAIRS:
+        notes.append(
+            "%d removed and %d added modules is too many to pair renames "
+            "across (%d combinations, limit %d), so they are reported as "
+            "plain additions and removals; a reorganisation this large is "
+            "also where pairing is least trustworthy."
+            % (len(removed), len(added), len(removed) * len(added),
+               MAX_RENAME_PAIRS))
+        return []
+
+    stable = _module_paths(old) & _module_paths(new)
+    old_nbrs = _neighbours(old, stable)
+    new_nbrs = _neighbours(new, stable)
+
+    # tier -> [(removed module, added module, evidence)]
+    by_tier = {tier: [] for tier in RENAME_TIERS}
+    for r in removed:
+        for a in added:
+            tier, evidence = _rename_tier(
+                r, a, old_nbrs.get(r.get("path"), frozenset()),
+                new_nbrs.get(a.get("path"), frozenset()))
+            if tier:
+                by_tier[tier].append((r, a, evidence))
+
+    out, taken_from, taken_to = [], set(), set()
+    for tier in RENAME_TIERS:  # strongest evidence claims its pairs first
+        pairs = [(r, a, ev) for r, a, ev in by_tier[tier]
+                 if r["path"] not in taken_from and a["path"] not in taken_to]
+        froms = Counter(r["path"] for r, _, _ in pairs)
+        tos = Counter(a["path"] for _, a, _ in pairs)
+        for r, a, evidence in pairs:
+            # sole candidate in both directions, or it stays unreported
+            if froms[r["path"]] == 1 and tos[a["path"]] == 1:
+                out.append({"from": r["path"], "to": a["path"],
+                            "confidence": tier, "evidence": evidence})
+                taken_from.add(r["path"])
+                taken_to.add(a["path"])
+    return sorted(out, key=lambda p: _sort_key((p["from"],)))
+
+
+def _rename_tier(r, a, old_nbrs, new_nbrs):
+    """(tier, evidence) for pairing removed module `r` with added `a`.
+
+    Same language throughout: a Python package does not become a Go one by
+    being moved, and allowing it would open the door to pairing on size alone.
+    """
+    if r.get("lang") != a.get("lang"):
+        return None, []
+    same_name = _basename(r.get("path")) == _basename(a.get("path"))
+    shared, union = len(old_nbrs & new_nbrs), len(old_nbrs | new_nbrs)
+    kept = ("%d of %d imports across unmoved modules preserved"
+            % (shared, union)) if union else None
+
+    if union and shared == union:
+        # every dependency to and from the unmoved parts of the graph
+        # survived: this is the signature of a move, not a coincidence
+        return "high", _evidence(kept, same_name and "same directory name")
+    if same_name and (not union or shared):
+        return "medium", _evidence("same directory name", kept)
+    if union and shared * 2 >= union:
+        return "medium", _evidence(kept)
+    if same_name:
+        # nothing but the name, which two unrelated packages can share
+        return "low", _evidence("same directory name",
+                                "no shared imports to corroborate it")
+    return None, []
+
+
+def _evidence(*parts):
+    return [p for p in parts if p]
+
+
+def _neighbours(kg, stable):
+    """{module: {(direction, other module, lang)}}, over unmoved modules only.
+
+    Restricted to the stable core deliberately. A candidate's neighbours may
+    themselves be candidates, and resolving those would require the answer
+    this is being used to compute.
+    """
+    nbrs = {}
+    for e in kg.get("edges") or ():
+        if not isinstance(e, dict):
+            continue
+        src, dst, lang = e.get("from"), e.get("to"), e.get("lang")
+        if src is None or dst is None:
+            continue
+        if dst in stable:
+            nbrs.setdefault(src, set()).add(("out", dst, lang))
+        if src in stable:
+            nbrs.setdefault(dst, set()).add(("in", src, lang))
+    return nbrs
+
+
+def _module_paths(kg):
+    return set(m["path"] for m in (kg.get("modules") or ())
+               if isinstance(m, dict) and "path" in m)
+
+
+def _basename(path):
+    return str(path or "").rstrip("/").rsplit("/", 1)[-1]
+
+
 # -- keyed set difference ----------------------------------------------------
 
 def _sectioned(identity, fields):
@@ -325,7 +475,8 @@ _SUBJECT = {
 }
 
 _MARKS = (("+", "added"), ("-", "removed"), ("~", "changed"))
-_MD_MARKS = {"+": "**+**", "-": "**−**", "~": "**~**"}
+_MD_MARKS = {"R": "**R**", "+": "**+**", "-": "**−**", "~": "**~**"}
+_MARK_ORDER = ("R", "+", "-", "~")
 
 
 def render_text(delta):
@@ -335,8 +486,8 @@ def render_text(delta):
     w(_header(delta, "->"))
     w("")
     for name, section in _report_sections(delta):
-        w("%s  %s" % (name, _tally(section)))
         rows = _rows(name, section, "->")
+        w("%s  %s" % (name, _tally(rows)))
         for mark, subject, detail in rows[:MAX_ROWS]:
             w(("  %s %-44s %s" % (mark, subject, detail)).rstrip())
         if len(rows) > MAX_ROWS:
@@ -362,9 +513,9 @@ def render_markdown(delta):
     w(_header(delta, "→"))
     w("")
     for name, section in _report_sections(delta):
-        w("### %s %s" % (name, _tally(section)))
-        w("")
         rows = _rows(name, section, "→")
+        w("### %s %s" % (name, _tally(rows)))
+        w("")
         for mark, subject, detail in rows[:MAX_ROWS]:
             w("- %s `%s`%s" % (_MD_MARKS[mark], subject,
                                (" — " + detail) if detail else ""))
@@ -420,22 +571,40 @@ def _report_sections(delta):
             yield name, section
 
 
-def _tally(section):
-    return " ".join("%s%d" % (mark, len(section.get(key, ())))
-                    for mark, key in _MARKS if section.get(key))
+def _tally(rows):
+    """Counts derived from the rows actually printed, so the two agree even
+    though a rename suppresses the addition and removal it is made of."""
+    counts = Counter(mark for mark, _, _ in rows)
+    return " ".join("%s%d" % (mark, counts[mark])
+                    for mark in _MARK_ORDER if counts[mark])
 
 
 def _rows(name, section, arrow):
-    """(mark, subject, detail) per moved record, additions first."""
-    rows = []
+    """(mark, subject, detail) per moved record, renames first.
+
+    A renamed module prints once, as a rename; the addition and removal it is
+    made of are suppressed. The delta keeps all three, so a consumer that
+    distrusts the heuristic can ignore `renamed` and see exactly what it would
+    have seen without it — but printing one move three ways would obscure it.
+    """
+    rows, paired = [], {"+": set(), "-": set()}
+    for pair in section.get("renamed", ()):
+        paired["-"].add(pair["from"])
+        paired["+"].add(pair["to"])
+        rows.append(("R", "%s %s %s" % (pair["from"], arrow, pair["to"]),
+                     _bits(pair["confidence"],
+                           "; ".join(pair.get("evidence") or ()))))
     for mark, key in _MARKS:
         for item in section.get(key, ()):
             if mark == "~":
                 rows.append((mark, _subject(name, item["id"]),
                              _movement(item, arrow)))
-            else:
-                rows.append((mark, _subject(name, _identity(name, item)),
-                             _detail(name, item)))
+                continue
+            identity = _identity(name, item)
+            if identity and identity[0] in paired[mark]:
+                continue
+            rows.append((mark, _subject(name, identity),
+                         _detail(name, item)))
     return rows
 
 
