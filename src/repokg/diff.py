@@ -64,6 +64,15 @@ SHAPE_FIELDS = {"modules": ("lang",)}
 # carries identifies it, and everything else it carries is compared.
 OPS_IDENTITY = ("file", "dir", "path", "name")
 
+# Renderers cap each section. Moving a top-level directory relocates every
+# module under it, and a thousand-line wall in a terminal or a PR comment is
+# not a report — the tail is always counted out loud rather than dropped, and
+# `--format json` is never capped.
+MAX_ROWS = 40
+
+# Order the report reads in: what the architecture is, then what surrounds it.
+ORDER = ("modules", "edges", "languages", "ops", "branches", "prs")
+
 _DIGITS_RE = re.compile(r"(\d+)")
 
 
@@ -94,27 +103,34 @@ def build(old, new):
 
 
 def shape_changed(delta):
-    """True if the graph's shape moved, not merely its measurements.
+    """True if the graph's shape moved, not merely its measurements."""
+    return bool(shape_reasons(delta))
+
+
+def shape_reasons(delta):
+    """The sections that moved the graph's shape, in report order.
 
     Membership of the SHAPE sections, plus the field movements named in
     SHAPE_FIELDS. LOC drift, edge weight, branch tips and PR states are all
     excluded: they move on essentially every commit, so an exit code that
-    tracked them would carry no information.
+    tracked them would carry no information. Returned rather than reduced to a
+    boolean so the report can say *why* it is exiting non-zero.
     """
+    reasons = []
     for name in SHAPE:
         section = delta.get(name) or {}
         if name == "ops":
             if any(sub.get("added") or sub.get("removed")
                    for sub in section.values()):
-                return True
+                reasons.append(name)
             continue
-        if section.get("added") or section.get("removed"):
-            return True
         watched = SHAPE_FIELDS.get(name, ())
-        for entry in section.get("changed", ()):
-            if any(f in entry["before"] for f in watched):
-                return True
-    return False
+        if (section.get("added") or section.get("removed")
+                or any(f in entry["before"]
+                       for entry in section.get("changed", ())
+                       for f in watched)):
+            reasons.append(name)
+    return [name for name in ORDER if name in reasons]
 
 
 def any_change(delta):
@@ -290,3 +306,204 @@ def _sort_key(key):
 def _natural(text):
     return tuple((int(p), "") if p.isdigit() else (-1, p)
                  for p in _DIGITS_RE.split(text) if p != "")
+
+
+# -- reports -----------------------------------------------------------------
+#
+# Two renderings of one row set. Added, removed and changed rows are built
+# from the same identity the diff keyed on, so a module names itself the same
+# way whichever of the three it lands in.
+
+_NORMALISERS = {name: _sectioned(identity, fields)
+                for name, identity, fields in SECTIONS}
+
+# How a section's identity tuple reads as a subject.
+_SUBJECT = {
+    "edges": lambda i: "%s -> %s (%s)" % (i[0], i[1], i[2]) if len(i) > 2
+    else " -> ".join(i),
+    "prs": lambda i: "#" + i[0],
+}
+
+_MARKS = (("+", "added"), ("-", "removed"), ("~", "changed"))
+_MD_MARKS = {"+": "**+**", "-": "**−**", "~": "**~**"}
+
+
+def render_text(delta):
+    """Plain-text report, in the shape `repokg audit` already prints."""
+    out = []
+    w = out.append
+    w(_header(delta, "->"))
+    w("")
+    for name, section in _report_sections(delta):
+        w("%s  %s" % (name, _tally(section)))
+        rows = _rows(name, section, "->")
+        for mark, subject, detail in rows[:MAX_ROWS]:
+            w(("  %s %-44s %s" % (mark, subject, detail)).rstrip())
+        if len(rows) > MAX_ROWS:
+            w("  ... and %d more (--format json for all of them)"
+              % (len(rows) - MAX_ROWS))
+        w("")
+    w(_verdict(delta))
+    if delta.get("notes"):
+        w("")
+        w("Notes:")
+        for note in delta["notes"]:
+            w("  - %s" % note)
+    return "\n".join(out).rstrip()
+
+
+def render_markdown(delta):
+    """Markdown for a PR comment, which is the form the GitHub Action in #7
+    would post and the reason `--format md` exists at all."""
+    out = []
+    w = out.append
+    w("## Knowledge graph diff")
+    w("")
+    w(_header(delta, "→"))
+    w("")
+    for name, section in _report_sections(delta):
+        w("### %s %s" % (name, _tally(section)))
+        w("")
+        rows = _rows(name, section, "→")
+        for mark, subject, detail in rows[:MAX_ROWS]:
+            w("- %s `%s`%s" % (_MD_MARKS[mark], subject,
+                               (" — " + detail) if detail else ""))
+        if len(rows) > MAX_ROWS:
+            w("- … and %d more" % (len(rows) - MAX_ROWS))
+        w("")
+    w("**%s**" % _verdict(delta))
+    if delta.get("notes"):
+        w("")
+        for note in delta["notes"]:
+            w("> %s" % note)
+    return "\n".join(out).rstrip() + "\n"
+
+
+def _header(delta, arrow):
+    """Which two graphs these were.
+
+    Stated as fact and nothing more. Two graphs of the same commit is the
+    ordinary case — a stored graph against a fresh scan of an uncommitted
+    working tree — so it is not worth a warning.
+    """
+    old, new = delta.get("old") or {}, delta.get("new") or {}
+    if old.get("head") and old.get("head") == new.get("head"):
+        return "comparing two graphs of %s (the same commit)" \
+            % _short(old.get("head"))
+    return "comparing %s (%s) %s %s (%s)" % (
+        _short(old.get("head")), old.get("generated_at") or "?", arrow,
+        _short(new.get("head")), new.get("generated_at") or "?")
+
+
+def _verdict(delta):
+    """The bottom line, naming the exit code so it is discoverable without
+    reading the docs."""
+    if not any_change(delta):
+        return "no change (exit 0)"
+    reasons = shape_reasons(delta)
+    if reasons:
+        return "shape changed: %s (exit 1)" % ", ".join(reasons)
+    return ("measurements moved but the shape did not: %s (exit 0)"
+            % ", ".join(sorted(counts(delta))))
+
+
+def _report_sections(delta):
+    """(label, section) for everything that moved, ops flattened per key."""
+    for name in ORDER:
+        if name == "ops":
+            for key, sub in sorted((delta.get("ops") or {}).items()):
+                yield "ops." + key, sub
+            continue
+        section = delta.get(name) or {}
+        if section.get("added") or section.get("removed") \
+                or section.get("changed"):
+            yield name, section
+
+
+def _tally(section):
+    return " ".join("%s%d" % (mark, len(section.get(key, ())))
+                    for mark, key in _MARKS if section.get(key))
+
+
+def _rows(name, section, arrow):
+    """(mark, subject, detail) per moved record, additions first."""
+    rows = []
+    for mark, key in _MARKS:
+        for item in section.get(key, ()):
+            if mark == "~":
+                rows.append((mark, _subject(name, item["id"]),
+                             _movement(item, arrow)))
+            else:
+                rows.append((mark, _subject(name, _identity(name, item)),
+                             _detail(name, item)))
+    return rows
+
+
+def _identity(name, record):
+    norm = _NORMALISERS.get(name, _ops_record)
+    entry = norm(record)
+    return entry[0] if entry else ("?",)
+
+
+def _subject(name, identity):
+    identity = [str(part) for part in identity] or ["?"]
+    return _SUBJECT.get(name, lambda i: i[0])(identity)
+
+
+def _detail(name, record):
+    """The measurements worth showing beside an added or removed record."""
+    if not isinstance(record, dict):
+        return ""
+    if name == "modules":
+        return _bits(record.get("lang"), _count(record.get("files"), "file"),
+                     _count(record.get("loc"), "line"),
+                     "generated" if record.get("generated") else None)
+    if name == "edges":
+        return _bits(_count(record.get("count"), "import"))
+    if name == "languages":
+        return _bits(_count(record.get("files"), "file"),
+                     _count(record.get("loc"), "line"))
+    if name == "branches":
+        return _bits(record.get("status"))
+    if name == "prs":
+        return _bits(record.get("state"), record.get("title"))
+    entry = _ops_record(record)  # ops.*, whose extra fields vary by key
+    return _bits(*[_value(v) for v in (entry[2] if entry else {}).values()])
+
+
+def _movement(entry, arrow):
+    fields = sorted(set(entry.get("before") or {}) | set(entry.get("after")
+                                                         or {}))
+    return ", ".join(
+        "%s %s %s %s" % (field, _value((entry.get("before") or {}).get(field)),
+                         arrow, _value((entry.get("after") or {}).get(field)))
+        for field in fields)
+
+
+def _bits(*parts):
+    return ", ".join(str(p) for p in parts if p)
+
+
+def _count(n, noun):
+    if not isinstance(n, int) or isinstance(n, bool):
+        return None
+    return "%d %s%s" % (n, noun, "" if n == 1 else "s")
+
+
+def _value(v):
+    """A field value as report text, with long lists cut short — a config
+    dir's `entries` runs to thirty names and would swamp the line."""
+    if v is None:
+        return "(none)"
+    if isinstance(v, bool):
+        return "yes" if v else "no"
+    if isinstance(v, list):
+        if not v:
+            return "(empty)"
+        head = ", ".join(str(x) for x in v[:5])
+        return head if len(v) <= 5 else "%s +%d more" % (head, len(v) - 5)
+    return str(v)
+
+
+def _short(sha):
+    return (sha or "")[:12] or "(unknown)"
