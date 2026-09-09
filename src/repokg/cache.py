@@ -32,15 +32,20 @@ CACHE_FILE = "cache.json"
 CACHE_VERSION = 1
 
 
-def open_(repo, out, head, enabled=True):
-    """Return (Cache or None, reason). None only for `--no-cache`.
+def open_(repo, out, head, enabled=True, off_note="disabled (--no-cache)"):
+    """Return (Cache or None, reason). None only when caching is off.
 
     A cache that cannot be replayed still collects this scan's facts so the
     next one can be warm — it just starts empty. `reason` is a short phrase
     that `scan` prints, so a cold scan never happens silently.
+
+    `off_note` is that phrase for the disabled case. It is a parameter
+    because `--no-cache` is not the only thing that switches the cache off —
+    a scan of a git ref does too — and a scan that blamed a flag the user
+    never passed would send them looking for the wrong thing.
     """
     if not enabled:
-        return None, "disabled (--no-cache)"
+        return None, off_note
     doc, reason = _load(os.path.join(out, CACHE_FILE))
     changed = None
     if doc is None:

@@ -9,11 +9,11 @@ import os
 import sys
 
 from . import (__version__, cache, code, deps, diff, facts, findings, github,
-               gitinfo, inject, markdown, ops, prompts, validate)
+               gitinfo, inject, markdown, ops, prompts, refs, validate)
 
 
 def build_graph(repo, out, no_github, pr_limit, exclude=(), use_cache=True,
-                stream=None):
+                stream=None, cache_off_note="disabled (--no-cache)"):
     """Assemble the knowledge graph and return it, without writing kg.json.
 
     `scan` writes what this returns. `diff` cannot: the document already in
@@ -38,7 +38,8 @@ def build_graph(repo, out, no_github, pr_limit, exclude=(), use_cache=True,
     # single read per file too: the store memoizes extracted facts across
     # collectors that would otherwise each open the same file, and replays
     # them from the cache for files that have not changed since the last scan
-    scan_cache, cache_note = cache.open_(repo, out, info["head"], use_cache)
+    scan_cache, cache_note = cache.open_(repo, out, info["head"], use_cache,
+                                         cache_off_note)
     store = facts.Store(repo, scan_cache)
     languages, modules = code.collect(repo, tree, store)
     edge_stats = {}
@@ -187,7 +188,8 @@ def check(repo, out, md):
 
 
 def do_diff(repo, out, from_graph, to_graph, fmt, no_github, pr_limit,
-            exclude=(), use_cache=True, detect_renames=True):
+            exclude=(), use_cache=True, detect_renames=True,
+            from_ref=None, to_ref=None):
     """Report what changed between two knowledge graphs.
 
     Exit 0 when the graph's shape is unchanged, 1 when it changed, 2 on
@@ -206,23 +208,36 @@ def do_diff(repo, out, from_graph, to_graph, fmt, no_github, pr_limit,
     it was matched at, and turned off entirely by `--no-renames`. It changes
     how the report reads and never what the diff found or what it exits.
 
+    Either side can instead be a git ref, via `--from-ref` / `--to-ref`,
+    which scans the repository as it was at that commit in a throwaway
+    checkout. Refs are named by their own flags rather than accepted by
+    `--from` / `--to`, because a file called `main` and a ref called `main`
+    are both legal and deciding which was meant would be a guess.
+
     The graph is never written. The baseline is the document in <out>, so a
     scan that saved over it would leave the next run with nothing to compare
-    against. <out>/cache.json is still updated when a scan runs — it records
-    what each file contained, not what the graph concluded, and is what keeps
-    the scan that feeds this fast.
+    against. <out>/cache.json is still updated when a scan of the working
+    tree runs — it records what each file contained, not what the graph
+    concluded, and is what keeps the scan that feeds this fast. A ref scan
+    writes no cache at all: the cache keys on the repo's HEAD and on file
+    mtimes, and a checkout of a historical commit matches neither.
     """
-    if from_graph:
+    # `is not None`, not truthiness: `--from-ref ""` is a mistake, and
+    # falling through to the default baseline would quietly answer a
+    # different question than the one asked.
+    if from_ref is not None:
+        old = _at_ref(repo, from_ref, no_github, pr_limit, exclude)
+    elif from_graph:
         old = _load_graph(from_graph, "baseline", "")
     else:
         old = _load_graph(os.path.join(out, "kg.json"), "baseline",
                           " (run `repokg scan` first, or point --from at one)")
     if old is None:
         return 2
-    if to_graph:
+    if to_ref is not None:
+        new = _at_ref(repo, to_ref, no_github, pr_limit, exclude)
+    elif to_graph:
         new = _load_graph(to_graph, "comparison", "")
-        if new is None:
-            return 2
     else:
         try:
             # progress lines to stderr: stdout is the report, and may be piped
@@ -236,7 +251,19 @@ def do_diff(repo, out, from_graph, to_graph, fmt, no_github, pr_limit,
             print("error: cannot scan %s to compare against: %s" % (repo, e),
                   file=sys.stderr)
             return 2
+    if new is None:
+        return 2
     delta = diff.build(old, new, detect_renames)
+    if from_ref is not None and to_ref is None and not to_graph:
+        # The one asymmetry the command can produce, so it is stated rather
+        # than left for someone to deduce from a surprising addition. Said
+        # only for a live scan: how a *stored* graph was produced is not
+        # knowable from the document, and claiming it would be a guess.
+        delta["notes"].append(
+            "a commit was compared against a scan of the working tree, which "
+            "holds files no commit does — anything untracked, and anything "
+            "ignored that the walk does not already prune. Those are reported "
+            "as additions. Comparing two refs avoids it.")
     if fmt == "json":
         print(json.dumps(delta, indent=1))
     elif fmt == "md":
@@ -244,6 +271,36 @@ def do_diff(repo, out, from_graph, to_graph, fmt, no_github, pr_limit,
     else:
         print(diff.render_text(delta))
     return 1 if delta["shape_changed"] else 0
+
+
+def _at_ref(repo, ref, no_github, pr_limit, exclude):
+    """The graph as it was at `ref`, or None having said on stderr why not.
+
+    The cache is off and its directory is inside the throwaway checkout, so a
+    ref scan cannot write a cache keyed to a historical commit over the one
+    the working tree's scans depend on. Both halves of that are deliberate:
+    either alone would be enough, and neither costs anything.
+
+    `exclude` is the caller's — today's flags and today's .repokgignore, not
+    whatever the ignore file said at this commit. That is the symmetric
+    choice: reading each side's own ignore file would make an edit to that
+    file register as modules appearing and disappearing, which is a change in
+    what was measured rather than in what is there.
+
+    Two other things a ref scan reports as of now rather than as of the
+    commit: the branch list and the PR list, both of which come from the
+    shared .git and from GitHub. In a diff they are identical on both sides
+    and cancel, which is why this is a footnote and not a defect.
+    """
+    try:
+        with refs.checkout(repo, ref) as tree:
+            return build_graph(tree, os.path.join(tree, ".repokg"), no_github,
+                               pr_limit, exclude, use_cache=False,
+                               stream=sys.stderr,
+                               cache_off_note="off for a ref scan")
+    except (RuntimeError, OSError) as e:
+        print("error: %s" % e, file=sys.stderr)
+        return None
 
 
 def _load_graph(path, role, hint):
@@ -301,12 +358,22 @@ def main(argv=None):
     ap.add_argument("--diff", action="store_true",
                     help="inject/clean: dry run, print what would change")
     ap.add_argument("--json", action="store_true", help="audit/diff: machine-readable output")
-    ap.add_argument("--from", dest="from_graph", metavar="KG.JSON",
-                    help="diff: baseline graph (default: <out>/kg.json, i.e. "
-                         "what the last scan left there)")
-    ap.add_argument("--to", dest="to_graph", metavar="KG.JSON",
+    # A ref and a saved graph are alternative ways to name one side, so
+    # argparse rejects both being given rather than one silently winning.
+    frm = ap.add_mutually_exclusive_group()
+    frm.add_argument("--from", dest="from_graph", metavar="KG.JSON",
+                     help="diff: baseline graph (default: <out>/kg.json, i.e. "
+                          "what the last scan left there)")
+    frm.add_argument("--from-ref", dest="from_ref", metavar="REF",
+                     help="diff: baseline is the repo as it was at this git "
+                          "ref, scanned in a throwaway checkout")
+    to = ap.add_mutually_exclusive_group()
+    to.add_argument("--to", dest="to_graph", metavar="KG.JSON",
                     help="diff: graph to compare against (default: a fresh "
                          "scan, which is not written to disk)")
+    to.add_argument("--to-ref", dest="to_ref", metavar="REF",
+                    help="diff: compare against the repo as it was at this "
+                         "git ref")
     ap.add_argument("--no-renames", action="store_true",
                     help="diff: report a moved module as a plain addition and "
                          "removal instead of pairing the two, which is the "
@@ -351,7 +418,8 @@ def main(argv=None):
             return do_diff(repo, out, args.from_graph, args.to_graph,
                            args.fmt or ("json" if args.json else "text"),
                            args.no_github, args.pr_limit, exclude,
-                           not args.no_cache, not args.no_renames)
+                           not args.no_cache, not args.no_renames,
+                           args.from_ref, args.to_ref)
         else:  # generate
             scan(repo, out, args.no_github, args.pr_limit, exclude,
                  not args.no_cache)

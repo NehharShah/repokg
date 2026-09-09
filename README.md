@@ -74,7 +74,8 @@ timeline eras, and gotchas alongside the deterministic structure.
 
 Flags: `--out DIR` (default `<repo>/.repokg`), `--md FILE` (default `<repo>/KNOWLEDGE_GRAPH.md`),
 `--exclude PATTERN` (repeatable), `--no-github`, `--no-cache`, `--pr-limit N`, `--diff`, `--json`,
-`--from KG.JSON`, `--to KG.JSON`, `--format text|json|md`, `--no-renames`.
+`--from KG.JSON`, `--to KG.JSON`, `--from-ref REF`, `--to-ref REF`,
+`--format text|json|md`, `--no-renames`.
 
 ### Structural diff
 
@@ -111,6 +112,39 @@ feeding the diff fast. `repokg clean` removes it either way.) Point `--from` and
 `--format md` emits a report ready to paste into a PR comment, and `--format
 json` prints the whole delta keyed by record, uncapped, with scan progress moved
 to stderr so it stays pipeable.
+
+#### Diffing two commits
+
+`--from-ref` and `--to-ref` scan the repo as it was at a git ref — a branch,
+tag, sha or anything `git rev-parse` accepts:
+
+```sh
+repokg diff . --from-ref main --to-ref HEAD    # what this branch changes
+repokg diff . --from-ref v0.4.1 --to-ref v0.4.3
+repokg diff . --from-ref main                  # main vs your working tree
+```
+
+Each ref is laid out with `git worktree add --detach` into a throwaway
+directory, scanned, and removed — including when the scan fails, since a leaked
+worktree stays registered in `.git` and would show up in every later `git
+worktree list`. A ref scan writes no cache: the cache keys on `HEAD` and on file
+mtimes, and a checkout of an old commit matches neither, so it is switched off
+rather than allowed to overwrite the one your real scans depend on.
+
+Refs get their own flags instead of being accepted by `--from`/`--to` because a
+file named `main` and a branch named `main` are both legal, and guessing which
+you meant is the kind of inference this project avoids everywhere else.
+
+Two things worth knowing. Comparing a ref against your **working tree** is
+asymmetric — the working tree holds untracked and ignored files that no commit
+does — so the report says so in a note rather than leaving you to deduce it from
+a surprising addition. And a ref scan is always cold by nature, so pass
+`--no-github` when you do not need the PR list; it is the slowest part of a
+scan and it cancels out on both sides anyway.
+
+In CI, note that `actions/checkout` fetches depth 1 by default. A shallow clone
+does not contain the base branch, so ref diffs need `fetch-depth: 0` — repokg
+detects the shallow case and says so rather than failing obscurely.
 
 **Exit codes** follow `diff(1)` and `git diff --exit-code`: **0** unchanged,
 **1** the shape changed, **2** error. Shape means the *membership* of modules,
@@ -265,11 +299,20 @@ Or surface the architectural change a PR makes, which is what the three exit
 codes are for — a mistyped path must not read as a new dependency:
 
 ```yaml
+- uses: actions/checkout@v4
+  with:
+    fetch-depth: 0            # ref diffs need history; the default is depth 1
 - run: |
-    rc=0; pipx run repokg diff . --format md > diff.md || rc=$?
+    rc=0
+    pipx run repokg diff . --no-github \
+      --from-ref "origin/${{ github.base_ref }}" --format md > diff.md || rc=$?
     if [ "$rc" -gt 1 ]; then exit "$rc"; fi   # 2 = the diff failed, not the graph
     if [ "$rc" -eq 1 ]; then cat diff.md >> "$GITHUB_STEP_SUMMARY"; fi
 ```
+
+That compares the base branch against the checkout, so it reports what the PR
+changes rather than what has happened since someone last ran a scan. Drop the
+`--from-ref` to compare against a committed graph instead.
 
 KNOWLEDGE_GRAPH.md itself also lists any agent-context files it found, so an agent landing
 on the knowledge graph discovers your rules — and vice versa.
@@ -323,7 +366,7 @@ schema — everything else stays deterministic and reproducible.
 - [x] Java / Kotlin import graphs
 - [x] `--exclude` glob patterns + `.repokgignore`
 - [x] Incremental scan cache for large monorepos
-- [x] `repokg diff` — structural diff between two scans
+- [x] `repokg diff` — structural diff between two scans, or two git refs
 - [ ] `llms.txt` emission alongside KNOWLEDGE_GRAPH.md
 - [x] tsconfig `paths` alias + workspace package resolution
 - [ ] PyPI release + prebuilt GitHub Action
