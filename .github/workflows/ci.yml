@@ -22,3 +22,80 @@ jobs:
         run: |
           repokg generate . --no-github
           test -s KNOWLEDGE_GRAPH.md && test -s .repokg/kg.json
+
+  # The action is YAML, so unittest cannot reach it. Exercised against a
+  # throwaway repo rather than against repokg itself, which has no committed
+  # graph to check — see #22.
+  action:
+    name: action (check mode)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: build a fixture repo whose graph matches HEAD
+        run: |
+          set -euo pipefail
+          pip install --quiet .
+          mkdir -p "$RUNNER_TEMP/fixture/app"
+          cd "$RUNNER_TEMP/fixture"
+          : > app/__init__.py
+          echo 'x = 1' > app/main.py
+          git init -q -b main .
+          git config user.email t@x
+          git config user.name t
+          git add -A
+          git commit -qm base
+          repokg generate . --no-github
+
+      - name: a graph matching HEAD passes
+        id: fresh
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/fixture
+      - name: ... and reports itself not stale
+        run: |
+          test "${{ steps.fresh.outputs.stale }}" = "false"
+
+      - name: move HEAD past the graph
+        run: |
+          cd "$RUNNER_TEMP/fixture"
+          echo 'y = 2' >> app/main.py
+          git add -A
+          git commit -qm second
+
+      - name: strict false warns and lets the job pass
+        id: warned
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/fixture
+          strict: "false"
+      - name: ... but still reports the graph stale
+        run: |
+          test "${{ steps.warned.outputs.stale }}" = "true"
+
+      - name: strict true fails the step
+        id: failed
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/fixture
+      - name: ... and says so in the outcome
+        run: |
+          test "${{ steps.failed.outcome }}" = "failure"
+
+      # The distinction the exit codes exist for: repokg failing to run is not
+      # a verdict that the graph is stale, and must not send anyone off to
+      # regenerate a file that was never the problem.
+      - name: a path that does not exist is an error, not a stale graph
+        id: broken
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/no-such-dir
+      - name: ... reported as a failure with stale unset
+        run: |
+          test "${{ steps.broken.outcome }}" = "failure"
+          test "${{ steps.broken.outputs.stale }}" != "true"

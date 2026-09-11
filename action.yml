@@ -1,0 +1,135 @@
+name: "repokg"
+description: >-
+  Keep an AI-ready knowledge graph of your codebase honest in CI: fail when the
+  committed graph no longer matches HEAD.
+author: "Nehhar Shah"
+
+branding:
+  icon: "git-branch"
+  color: "purple"
+
+inputs:
+  path:
+    description: "Repository to check, relative to the workspace."
+    required: false
+    default: "."
+  mode:
+    description: >-
+      What to do. `check` fails when the committed knowledge graph is stale
+      against HEAD. It is the only mode today; naming it now means adding
+      `comment` later does not change how anyone already calls this.
+    required: false
+    default: "check"
+  strict:
+    description: >-
+      Fail the job when the graph is stale. Set `false` to annotate a warning
+      and pass instead, which is the honest setting while a repo is adopting
+      this and its graph is not yet committed.
+    required: false
+    default: "true"
+  out:
+    description: "Directory holding kg.json (repokg's --out)."
+    required: false
+    default: ""
+  md:
+    description: "Path to the rendered markdown (repokg's --md)."
+    required: false
+    default: ""
+
+outputs:
+  stale:
+    description: >-
+      `true` when the graph does not match HEAD. Set whether or not `strict`
+      failed the job, so a following step can react without re-running
+      anything.
+    value: ${{ steps.check.outputs.stale }}
+  result:
+    description: "The line repokg printed, for use in a comment or summary."
+    value: ${{ steps.check.outputs.result }}
+
+runs:
+  using: "composite"
+  steps:
+    # Installed from the action's own directory rather than from PyPI. The
+    # action *is* repokg, so `uses: NehharShah/repokg@v0.4.5` installs exactly
+    # the code at that tag — there is no second version number to keep in sync
+    # and no way for the action and the tool to drift apart. It also means a
+    # commit can be tested before it has been released.
+    - name: Install repokg
+      shell: bash
+      run: |
+        set -euo pipefail
+        if command -v pipx >/dev/null 2>&1; then
+          # --force so a workflow that uses this action twice does not fail
+          # the second time on an existing install
+          pipx install --force "${{ github.action_path }}"
+          # asked rather than assumed: PIPX_BIN_DIR is configurable, and a
+          # self-hosted runner that moved it would otherwise install repokg
+          # successfully and then fail to find it
+          bin_dir="$(pipx environment --value PIPX_BIN_DIR 2>/dev/null \
+                     || echo "$HOME/.local/bin")"
+          echo "$bin_dir" >> "$GITHUB_PATH"
+        else
+          # pipx ships on GitHub-hosted runners; this is for self-hosted ones
+          # that do not have it
+          python3 -m pip install --quiet --user "${{ github.action_path }}"
+          echo "$(python3 -m site --user-base)/bin" >> "$GITHUB_PATH"
+        fi
+
+    - name: repokg ${{ inputs.mode }}
+      id: check
+      shell: bash
+      env:
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_STRICT: ${{ inputs.strict }}
+        INPUT_OUT: ${{ inputs.out }}
+        INPUT_MD: ${{ inputs.md }}
+      run: |
+        # `set +e` explicitly, and not merely "no set -e": GitHub runs
+        # composite bash steps as `bash --noprofile --norc -e -o pipefail`,
+        # so errexit is already on. Here a non-zero exit from repokg is the
+        # result being measured, not a failure to abort on — left as-is, the
+        # step would die on the stale case before deciding anything about it.
+        set +e
+        set -uo pipefail
+
+        if [ "$INPUT_MODE" != "check" ]; then
+          echo "::error::unknown mode '$INPUT_MODE' (supported: check)"
+          exit 1
+        fi
+
+        args=("$INPUT_PATH")
+        if [ -n "$INPUT_OUT" ]; then args+=(--out "$INPUT_OUT"); fi
+        if [ -n "$INPUT_MD" ]; then args+=(--md "$INPUT_MD"); fi
+
+        result=$(repokg check "${args[@]}" 2>&1)
+        rc=$?
+        echo "$result"
+        {
+          echo "result<<REPOKG_EOF"
+          echo "$result"
+          echo "REPOKG_EOF"
+        } >> "$GITHUB_OUTPUT"
+
+        # 2 and above is repokg failing to run at all — a bad path, a broken
+        # install. That is not a verdict about the graph, and reporting it as
+        # a stale graph would send someone to regenerate a file that was
+        # never the problem.
+        if [ "$rc" -gt 1 ]; then
+          echo "stale=false" >> "$GITHUB_OUTPUT"
+          echo "::error::repokg could not run (exit $rc): $result"
+          exit "$rc"
+        fi
+
+        if [ "$rc" -eq 0 ]; then
+          echo "stale=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "stale=true" >> "$GITHUB_OUTPUT"
+        if [ "$INPUT_STRICT" = "true" ]; then
+          echo "::error::$result — run \`repokg generate\` and commit the result"
+          exit 1
+        fi
+        echo "::warning::$result — run \`repokg generate\` and commit the result"
