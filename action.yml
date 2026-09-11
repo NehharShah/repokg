@@ -1,7 +1,8 @@
 name: "repokg"
 description: >-
-  Keep an AI-ready knowledge graph of your codebase honest in CI: fail when the
-  committed graph no longer matches HEAD.
+  Keep an AI-ready knowledge graph of your codebase honest in CI. Fail a build
+  when the committed graph goes stale, and comment on a pull request with the
+  architecture it changes.
 author: "Nehhar Shah"
 
 branding:
