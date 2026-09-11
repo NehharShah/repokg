@@ -357,6 +357,11 @@ working tree. Both sides are then built the same way, so nothing in the report
 is an artefact of how it was produced. `changed` is `true` only when the
 *shape* moved; LOC drift alone leaves it `false` and posts nothing.
 
+The report is also written to the job summary, and `report-path` points at a
+file holding it — for uploading as an artifact or sending somewhere else.
+Read the file, not `$GITHUB_STEP_SUMMARY`: GitHub gives every step its own
+summary file, so a later step cannot see what this one wrote.
+
 A shape change never fails the job — a PR that adds a module is the normal
 case, not an error. Only repokg failing to run does, which is what the
 `fetch-depth: 0` above prevents: a shallow clone has no base branch, and

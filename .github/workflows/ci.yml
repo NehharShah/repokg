@@ -149,14 +149,18 @@ jobs:
           path: ${{ runner.temp }}/fx
           mode: comment
           base: ${{ env.FIRST }}
-      - name: ... reported as changed, and written to the summary
+      - name: ... reported as changed, with the report where it says it is
+        env:
+          REPORT: ${{ steps.changed.outputs.report-path }}
         run: |
           test "${{ steps.changed.outputs.changed }}" = "true"
-          grep -q "repokg:diff" "$GITHUB_STEP_SUMMARY"
-          grep -q "billing" "$GITHUB_STEP_SUMMARY"
+          # not $GITHUB_STEP_SUMMARY: each step gets its own summary file,
+          # so what the action wrote is not readable from here
+          grep -q "repokg:diff" "$REPORT"
+          grep -q "billing" "$REPORT"
           # two refs, so neither side is a working tree and the report must
           # carry no note about untracked files
-          ! grep -q "holds files no commit does" "$GITHUB_STEP_SUMMARY"
+          ! grep -q "holds files no commit does" "$REPORT"
 
       - name: a ref against itself is not a shape change
         id: same

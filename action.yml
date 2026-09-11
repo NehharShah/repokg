@@ -68,6 +68,13 @@ outputs:
   comment-url:
     description: "comment mode: the comment posted or updated, if there was one."
     value: ${{ steps.comment.outputs.comment-url }}
+  report-path:
+    description: >-
+      comment mode: a file holding the markdown report. A path rather than
+      the text, because the report has no length bound worth relying on. The
+      job summary is not an alternative — GitHub gives each step its own
+      summary file, so no later step can read what this one wrote.
+    value: ${{ steps.comment.outputs.report-path }}
 
 runs:
   using: "composite"
@@ -248,6 +255,7 @@ runs:
         # The summary is written whichever way this goes, so a push build
         # that has no pull request to comment on is still worth running.
         cat "$body" >> "$GITHUB_STEP_SUMMARY"
+        echo "report-path=$body" >> "$GITHUB_OUTPUT"
 
         pr=""
         if [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "$GITHUB_EVENT_PATH" ]; then
