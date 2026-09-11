@@ -86,8 +86,12 @@ runs:
         INPUT_OUT: ${{ inputs.out }}
         INPUT_MD: ${{ inputs.md }}
       run: |
-        # Deliberately not `set -e`: the exit code is the result, not a
-        # failure to handle.
+        # `set +e` explicitly, and not merely "no set -e": GitHub runs
+        # composite bash steps as `bash --noprofile --norc -e -o pipefail`,
+        # so errexit is already on. Here a non-zero exit from repokg is the
+        # result being measured, not a failure to abort on — left as-is, the
+        # step would die on the stale case before deciding anything about it.
+        set +e
         set -uo pipefail
 
         if [ "$INPUT_MODE" != "check" ]; then
@@ -96,8 +100,8 @@ runs:
         fi
 
         args=("$INPUT_PATH")
-        [ -n "$INPUT_OUT" ] && args+=(--out "$INPUT_OUT")
-        [ -n "$INPUT_MD" ] && args+=(--md "$INPUT_MD")
+        if [ -n "$INPUT_OUT" ]; then args+=(--out "$INPUT_OUT"); fi
+        if [ -n "$INPUT_MD" ]; then args+=(--md "$INPUT_MD"); fi
 
         result=$(repokg check "${args[@]}" 2>&1)
         rc=$?
