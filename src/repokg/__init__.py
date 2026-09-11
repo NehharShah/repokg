@@ -1,3 +1,3 @@
 """repokg: generate an AI-ready knowledge graph of any codebase."""
 
-__version__ = "0.4.4"
+__version__ = "0.4.5"
