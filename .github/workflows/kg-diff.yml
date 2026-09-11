@@ -1,0 +1,25 @@
+name: Knowledge graph diff
+
+# Dogfooding, which #7 asks for and check mode cannot provide: check needs a
+# committed graph, and this repo gitignores both .repokg/ and
+# KNOWLEDGE_GRAPH.md. Comment mode scans the base ref directly, so it needs
+# nothing committed and works here today.
+
+on: pull_request
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # comment mode compares two commits, so the base branch has to be
+          # in the clone; the default depth of 1 does not include it
+          fetch-depth: 0
+      - uses: ./
+        with:
+          mode: comment
