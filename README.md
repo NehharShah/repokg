@@ -255,7 +255,36 @@ content) pointing agents at KNOWLEDGE_GRAPH.md:
 - **`.cursor/rules/repokg.mdc`** (Cursor, with `alwaysApply: true`) — created
   if `.cursor/rules/` exists; falls back to legacy `.cursorrules`
 
-Keep it fresh in CI:
+Keep it fresh in CI, either with the action:
+
+```yaml
+- uses: actions/checkout@v4
+- uses: NehharShah/repokg@v0.4.5
+```
+
+That fails the job when the committed graph no longer matches `HEAD`. Set
+`strict: false` to annotate a warning and pass instead, which is the honest
+setting while you are adopting this. The `stale` output is set either way, so a
+following step can react without re-running anything:
+
+```yaml
+- uses: NehharShah/repokg@v0.4.5
+  id: kg
+  with:
+    strict: false
+- if: steps.kg.outputs.stale == 'true'
+  run: echo "${{ steps.kg.outputs.result }}" >> "$GITHUB_STEP_SUMMARY"
+```
+
+The action installs repokg from its own checkout rather than from PyPI, so
+`@v0.4.5` runs repokg 0.4.5 by construction — there is no second version to
+keep in sync and no way for the two to drift apart.
+
+**Check mode needs a committed graph.** It compares the `HEAD` recorded in
+`.repokg/kg.json` against the actual `HEAD`, so a repo that gitignores
+`.repokg/` has nothing to compare and will report stale on every run. Commit
+`.repokg/kg.json` and `KNOWLEDGE_GRAPH.md` if you want this check to mean
+anything. Or without the action:
 
 ```yaml
 - run: pipx run repokg check . || echo "::warning::KNOWLEDGE_GRAPH.md is stale"
@@ -326,7 +355,7 @@ schema — everything else stays deterministic and reproducible.
 - [x] `repokg diff` — structural diff between two scans
 - [ ] `llms.txt` emission alongside KNOWLEDGE_GRAPH.md
 - [x] tsconfig `paths` alias + workspace package resolution
-- [ ] PyPI release + prebuilt GitHub Action
+- [x] PyPI release + GitHub Action (check mode; PR comments next)
 
 ## Development
 
