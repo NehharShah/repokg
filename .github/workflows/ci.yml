@@ -99,3 +99,82 @@ jobs:
         run: |
           test "${{ steps.broken.outcome }}" = "failure"
           test "${{ steps.broken.outputs.stale }}" != "true"
+
+      - name: an unknown mode is refused
+        id: badmode
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/fixture
+          mode: sideways
+      - run: test "${{ steps.badmode.outcome }}" = "failure"
+
+  # Comment mode without a pull request: everything except the API call,
+  # which only a real PR can exercise — and does, via kg-diff.yml.
+  comment:
+    name: action (comment mode)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: build a fixture repo whose second commit adds a module
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/fx/app" "$RUNNER_TEMP/fx/lib"
+          cd "$RUNNER_TEMP/fx"
+          : > app/__init__.py
+          echo 'from lib import helper' > app/main.py
+          : > lib/__init__.py
+          echo 'def helper(): pass' > lib/helper.py
+          git init -q -b main .
+          git config user.email t@x
+          git config user.name t
+          git add -A
+          git commit -qm base
+          echo "FIRST=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          mkdir -p billing
+          : > billing/__init__.py
+          echo 'def charge(): pass' > billing/charge.py
+          printf 'from lib import helper\nfrom billing import charge\n' > app/main.py
+          git add -A
+          git commit -qm second
+
+      - name: a new module and edge is a shape change
+        id: changed
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/fx
+          mode: comment
+          base: ${{ env.FIRST }}
+      - name: ... reported as changed, and written to the summary
+        run: |
+          test "${{ steps.changed.outputs.changed }}" = "true"
+          grep -q "repokg:diff" "$GITHUB_STEP_SUMMARY"
+          grep -q "billing" "$GITHUB_STEP_SUMMARY"
+          # two refs, so neither side is a working tree and the report must
+          # carry no note about untracked files
+          ! grep -q "holds files no commit does" "$GITHUB_STEP_SUMMARY"
+
+      - name: a ref against itself is not a shape change
+        id: same
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/fx
+          mode: comment
+          base: HEAD
+      - run: test "${{ steps.same.outputs.changed }}" = "false"
+
+      - name: a base that does not exist is an error, not a shape change
+        id: badbase
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/fx
+          mode: comment
+          base: no-such-ref
+      - run: |
+          test "${{ steps.badbase.outcome }}" = "failure"
+          test "${{ steps.badbase.outputs.changed }}" != "true"

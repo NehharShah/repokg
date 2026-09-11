@@ -324,6 +324,46 @@ anything. Or without the action:
 - run: pipx run repokg check . || echo "::warning::KNOWLEDGE_GRAPH.md is stale"
 ```
 
+#### Structural diffs on pull requests
+
+`mode: comment` reports what a PR changes architecturally, as a PR comment and
+a job summary. It needs nothing committed:
+
+```yaml
+on: pull_request
+permissions:
+  contents: read
+  pull-requests: write     # or the comment cannot be posted
+jobs:
+  diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the base branch has to be in the clone
+      - uses: NehharShah/repokg@v0.4.5
+        with:
+          mode: comment
+```
+
+One comment per PR, found by a hidden marker and edited in place, so a long
+branch does not accumulate a running commentary of its own history. A PR with
+no structural change gets no comment at all — but if an earlier push already
+posted one, it is rewritten rather than left asserting a finding the latest
+push undid.
+
+It compares the base branch against `HEAD` as **two commits**, not against the
+working tree. Both sides are then built the same way, so nothing in the report
+is an artefact of how it was produced. `changed` is `true` only when the
+*shape* moved; LOC drift alone leaves it `false` and posts nothing.
+
+A shape change never fails the job — a PR that adds a module is the normal
+case, not an error. Only repokg failing to run does, which is what the
+`fetch-depth: 0` above prevents: a shallow clone has no base branch, and
+repokg says so by name. Posting the comment is best-effort — a PR from a fork
+gets a read-only token, so that case warns and leaves the report in the job
+summary rather than failing a contributor's build.
+
 Or surface the architectural change a PR makes, which is what the three exit
 codes are for — a mistyped path must not read as a new dependency:
 
@@ -398,7 +438,7 @@ schema — everything else stays deterministic and reproducible.
 - [x] `repokg diff` — structural diff between two scans, or two git refs
 - [ ] `llms.txt` emission alongside KNOWLEDGE_GRAPH.md
 - [x] tsconfig `paths` alias + workspace package resolution
-- [x] PyPI release + GitHub Action (check mode; PR comments next)
+- [x] PyPI release + GitHub Action (staleness check, PR structural diffs)
 
 ## Development
 

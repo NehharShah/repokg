@@ -15,11 +15,24 @@ inputs:
     default: "."
   mode:
     description: >-
-      What to do. `check` fails when the committed knowledge graph is stale
-      against HEAD. It is the only mode today; naming it now means adding
-      `comment` later does not change how anyone already calls this.
+      `check` fails when the committed knowledge graph is stale against HEAD.
+      `comment` reports what a pull request changes structurally, as a PR
+      comment and a job summary.
     required: false
     default: "check"
+  base:
+    description: >-
+      comment mode: the ref to compare against. Defaults to the pull
+      request's base branch, which is the only answer that is right by
+      default.
+    required: false
+    default: ""
+  token:
+    description: >-
+      comment mode: token used to post the comment. Needs
+      `pull-requests: write`.
+    required: false
+    default: ${{ github.token }}
   strict:
     description: >-
       Fail the job when the graph is stale. Set `false` to annotate a warning
@@ -39,13 +52,22 @@ inputs:
 outputs:
   stale:
     description: >-
-      `true` when the graph does not match HEAD. Set whether or not `strict`
-      failed the job, so a following step can react without re-running
-      anything.
+      check mode: `true` when the graph does not match HEAD. Set whether or
+      not `strict` failed the job, so a following step can react without
+      re-running anything.
     value: ${{ steps.check.outputs.stale }}
   result:
-    description: "The line repokg printed, for use in a comment or summary."
+    description: "check mode: the line repokg printed."
     value: ${{ steps.check.outputs.result }}
+  changed:
+    description: >-
+      comment mode: `true` when the pull request moves the graph's shape —
+      a module, dependency, language or ops entry appearing or disappearing.
+      Measurement drift alone reads as `false`.
+    value: ${{ steps.comment.outputs.changed }}
+  comment-url:
+    description: "comment mode: the comment posted or updated, if there was one."
+    value: ${{ steps.comment.outputs.comment-url }}
 
 runs:
   using: "composite"
@@ -76,8 +98,23 @@ runs:
           echo "$(python3 -m site --user-base)/bin" >> "$GITHUB_PATH"
         fi
 
-    - name: repokg ${{ inputs.mode }}
+    - name: reject an unknown mode
+      shell: bash
+      env:
+        INPUT_MODE: ${{ inputs.mode }}
+      run: |
+        set -euo pipefail
+        case "$INPUT_MODE" in
+          check|comment) ;;
+          *)
+            echo "::error::unknown mode '$INPUT_MODE' (supported: check, comment)"
+            exit 1
+            ;;
+        esac
+
+    - name: repokg check
       id: check
+      if: inputs.mode == 'check'
       shell: bash
       env:
         INPUT_PATH: ${{ inputs.path }}
@@ -93,11 +130,6 @@ runs:
         # step would die on the stale case before deciding anything about it.
         set +e
         set -uo pipefail
-
-        if [ "$INPUT_MODE" != "check" ]; then
-          echo "::error::unknown mode '$INPUT_MODE' (supported: check)"
-          exit 1
-        fi
 
         args=("$INPUT_PATH")
         if [ -n "$INPUT_OUT" ]; then args+=(--out "$INPUT_OUT"); fi
@@ -133,3 +165,140 @@ runs:
           exit 1
         fi
         echo "::warning::$result — run \`repokg generate\` and commit the result"
+
+    - name: repokg diff
+      id: comment
+      if: inputs.mode == 'comment'
+      shell: bash
+      env:
+        # Every value the script reads arrives as an environment variable
+        # rather than interpolated into the source with ${{ }}. A branch name
+        # is attacker-controlled on a fork PR, and text substituted into a
+        # shell script is a shell injection; text in a variable is not.
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_BASE: ${{ inputs.base }}
+        INPUT_OUT: ${{ inputs.out }}
+        INPUT_MD: ${{ inputs.md }}
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        set +e
+        set -uo pipefail
+
+        marker="<!-- repokg:diff -->"
+        # GitHub rejects a comment body over 65536 characters. Losing the
+        # report entirely because a reorganisation was large is the worst
+        # outcome, so it is cut short and says so.
+        limit=60000
+
+        base="$INPUT_BASE"
+        if [ -z "$base" ]; then
+          if [ -z "${GITHUB_BASE_REF:-}" ]; then
+            echo "::notice::not a pull request and no base given, so there is nothing to compare against; skipping"
+            exit 0
+          fi
+          base="origin/$GITHUB_BASE_REF"
+        fi
+
+        # Two refs, rather than a ref against the working tree. Both sides
+        # are then built the same way, which keeps untracked files out of the
+        # comparison and avoids the asymmetry note repokg would rightly add.
+        # It costs one extra checkout and buys a report with nothing in it
+        # that is an artefact of how it was produced.
+        #
+        # --no-github because branches and PRs are collected as of now on
+        # both sides, so they cancel out — fetching them twice would spend
+        # two API round trips to change nothing.
+        args=("$INPUT_PATH" --from-ref "$base" --to-ref HEAD
+              --format md --no-github)
+        if [ -n "$INPUT_OUT" ]; then args+=(--out "$INPUT_OUT"); fi
+        if [ -n "$INPUT_MD" ]; then args+=(--md "$INPUT_MD"); fi
+
+        report="$RUNNER_TEMP/repokg-diff.md"
+        repokg diff "${args[@]}" > "$report" 2> "$RUNNER_TEMP/repokg-diff.err"
+        rc=$?
+        cat "$RUNNER_TEMP/repokg-diff.err" >&2
+
+        if [ "$rc" -gt 1 ]; then
+          # Same rule as check mode: failing to produce a diff is not a
+          # finding about the architecture. A shallow clone lands here, and
+          # repokg's own error already names fetch-depth.
+          echo "changed=false" >> "$GITHUB_OUTPUT"
+          why=$(head -c 400 "$RUNNER_TEMP/repokg-diff.err" | tr '\n' ' ')
+          echo "::error::repokg diff could not run (exit $rc): $why"
+          exit "$rc"
+        fi
+
+        [ "$rc" -eq 1 ] && changed=true || changed=false
+        echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
+        body="$RUNNER_TEMP/repokg-comment.md"
+        {
+          echo "$marker"
+          echo
+          if [ "$(wc -c < "$report")" -gt "$limit" ]; then
+            head -c "$limit" "$report"
+            echo
+            echo
+            echo "_Cut short at $limit characters; \`--format json\` is uncapped._"
+          else
+            cat "$report"
+          fi
+        } > "$body"
+
+        # The summary is written whichever way this goes, so a push build
+        # that has no pull request to comment on is still worth running.
+        cat "$body" >> "$GITHUB_STEP_SUMMARY"
+
+        pr=""
+        if [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "$GITHUB_EVENT_PATH" ]; then
+          pr=$(jq -r '.pull_request.number // empty' "$GITHUB_EVENT_PATH")
+        fi
+        if [ -z "$pr" ]; then
+          echo "::notice::no pull request to comment on; the report is in the job summary"
+          exit 0
+        fi
+
+        # One comment per pull request, found by its marker and edited in
+        # place. A new comment per push would bury the PR in a running
+        # commentary of its own history.
+        existing=$(gh api "repos/$GITHUB_REPOSITORY/issues/$pr/comments" \
+          --paginate --jq \
+          "[.[] | select(.body | contains(\"$marker\")) | .id] | first // empty")
+
+        if [ -z "$existing" ] && [ "$changed" = "false" ]; then
+          # Nothing to say and nothing already said. Posting "no structural
+          # change" on every pull request is how a bot gets muted.
+          echo "::notice::no structural change; not opening a comment to say so"
+          exit 0
+        fi
+
+        if [ "$changed" = "false" ]; then
+          # But a comment that already exists must not be left asserting a
+          # finding the latest push undid.
+          {
+            echo "$marker"
+            echo
+            echo "## Knowledge graph diff"
+            echo
+            echo "No structural change against \`$base\` as of this push."
+          } > "$body"
+        fi
+
+        if [ -n "$existing" ]; then
+          url=$(gh api "repos/$GITHUB_REPOSITORY/issues/comments/$existing" \
+            -X PATCH -F body=@"$body" --jq .html_url)
+        else
+          url=$(gh api "repos/$GITHUB_REPOSITORY/issues/$pr/comments" \
+            -X POST -F body=@"$body" --jq .html_url)
+        fi
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+          # A warning, not an error. A pull request from a fork gets a
+          # read-only token, so this fails for every outside contributor
+          # through no fault of theirs, and the report is in the job summary
+          # either way. Losing the comment is not worth losing the build.
+          echo "::warning::could not post the comment (does the workflow grant pull-requests: write? a fork's token is read-only) — the report is in the job summary"
+          exit 0
+        fi
+        echo "comment-url=$url" >> "$GITHUB_OUTPUT"
+        echo "::notice::$url"
