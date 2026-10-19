@@ -8,6 +8,58 @@ extracted the deterministic structure of this codebase into `{out}/kg.json` and
 rendered it as `{md}`. Your job is to add the semantic layer that static analysis
 cannot produce — and to verify every claim by actually reading the code.
 
+## Is this a re-run?
+
+If `{out}/narratives.json` already exists, do **not** start over. Structure
+refreshes on every scan, but narratives rot silently: a module can be rewritten
+while its purpose line stays frozen. `repokg` records what each enriched module
+contained when its purpose line was written (`{out}/narratives.lock.json`) and
+can tell you exactly which ones have drifted. Re-verify those and nothing else.
+Skip to "Steps" below only if `narratives.json` does not exist yet.
+
+1. Find the flagged modules:
+
+```sh
+repokg check {repo}
+```
+
+   Each `narrative stale: <module> (N of M files changed since enrichment)` line
+   is one module to re-verify. `repokg audit {repo} --json` lists the same
+   modules as findings with `"kind": "narrative"`; the subject reads
+   `<module>: narrative may be stale` and `evidence` names the changed files.
+   By default any changed file flags a module; if this repo's CI passes
+   `--stale-threshold PERCENT` to `check`, pass the same value here.
+2. For each flagged module, and only those, re-read its code, starting with the
+   changed files. Compare what it does now with its current line in
+   `narratives.json`. Do not re-read, re-word or re-verify modules that were not
+   flagged: their stamps say nothing has changed.
+3. Decide per module:
+   - The purpose line is now wrong or incomplete: rewrite that one line in
+     `{out}/narratives.json`. Rewriting it re-stamps the module on the next render.
+   - The purpose line still holds: leave the text alone and re-stamp it with
+     `--restamp` in the next step.
+4. Re-render, passing `--restamp <module>` (repeatable) for each module that
+   still holds. Rewritten modules do not need it:
+
+```sh
+repokg render {repo} --restamp path/of/module --restamp another/module
+```
+
+5. Run `repokg check {repo}` again. It should no longer report a stale
+   narrative. If it still flags a module you did not touch, it changed while you
+   were working; handle it the same way.
+
+Rules for a re-run:
+
+- Never use `--restamp` on a module you have not actually re-read. It certifies
+  "I verified this against the current code"; using it to silence a flag
+  defeats the check.
+- Touch other parts of `narratives.json` (overview, flows, timeline, gotchas)
+  only if what you read in a flagged module shows them to be false.
+- If `repokg check` reports nothing stale, there is nothing to do. If it says
+  narratives exist but there is no lock, run `repokg render {repo}` once to
+  start tracking and stop.
+
 ## Steps
 
 1. Read `{out}/kg.json`. Note the modules (sorted by LOC), the dependency edges,
@@ -45,7 +97,8 @@ cannot produce — and to verify every claim by actually reading the code.
 }}
 ```
 
-7. Re-render the final document, and wire it into this repo's agent context files
+7. Re-render the final document (this also records each module's fingerprint,
+   which is what lets a later run find out which narratives went stale), and wire it into this repo's agent context files
    (CLAUDE.md / AGENTS.md / Cursor rules) so future agents find it:
 
 ```sh
