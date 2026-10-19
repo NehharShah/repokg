@@ -17,7 +17,8 @@ inputs:
     default: "."
   mode:
     description: >-
-      `check` fails when the committed knowledge graph is stale against HEAD.
+      `check` fails when the committed knowledge graph is stale against HEAD,
+      or when an enriched module's narrative has drifted from its code.
       `comment` reports what a pull request changes structurally, as a PR
       comment and a job summary.
     required: false
@@ -169,11 +170,37 @@ runs:
         fi
 
         echo "stale=true" >> "$GITHUB_OUTPUT"
+
+        # `repokg generate` fixes a graph that is behind HEAD and does nothing
+        # for a narrative that has drifted from its code: that needs the
+        # modules re-read, then re-rendered. Telling someone to regenerate
+        # for the second kind would send them round a loop that never ends,
+        # so the advice follows what repokg actually reported. Annotations
+        # end at the first newline, so the report is joined onto one line —
+        # without it the advice would be cut off whenever more than one line
+        # was printed.
+        graph=false
+        narrative=false
+        case "$result" in *"stale: knowledge graph"*) graph=true ;; esac
+        case "$result" in *"narrative stale:"*) narrative=true ;; esac
+        advice=""
+        if [ "$graph" = "true" ]; then
+          advice="run \`repokg generate\` and commit the result"
+        fi
+        if [ "$narrative" = "true" ]; then
+          fix="re-verify the flagged modules, then run \`repokg render --restamp MODULE\` for each that still holds, and commit .repokg"
+          advice="${advice:+$advice; }$fix"
+        fi
+        if [ -z "$advice" ]; then
+          advice="run \`repokg generate\` and commit the result"
+        fi
+        summary=$(printf '%s\n' "$result" | grep -v -e '^re-verify' -e '^note:' | tr '\n' ' ' | sed 's/ *$//')
+
         if [ "$INPUT_STRICT" = "true" ]; then
-          echo "::error::$result — run \`repokg generate\` and commit the result"
+          echo "::error::$summary — $advice"
           exit 1
         fi
-        echo "::warning::$result — run \`repokg generate\` and commit the result"
+        echo "::warning::$summary — $advice"
 
     - name: repokg diff
       id: comment
