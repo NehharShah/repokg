@@ -6,8 +6,9 @@ import subprocess
 INTEGRATION_CANDIDATES = ("staging", "develop", "dev", "next", "canary")
 
 
-def run(repo, *args):
-    p = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+def run(repo, *args, stdin=None):
+    p = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True,
+                       input=stdin)
     if p.returncode != 0:
         raise RuntimeError("git %s: %s" % (" ".join(args), p.stderr.strip()))
     return p.stdout.strip()
