@@ -48,6 +48,17 @@ python -m unittest discover -s tests -v   # all tests
 repokg generate . --no-github             # dogfood on this repo
 ```
 
+## Adding a PR provider
+
+PR data comes from `src/repokg/providers.py`; the branch classifier
+(`github.classify`) only reads the normalized PR shape and never needs to change.
+To support another host, subclass `PRProvider`, implement
+`fetch_prs(repo, limit) -> (prs, note)` (shape and degradation rules are in the
+module docstring — return a `note` instead of raising when the CLI, network or
+credentials are missing), and add the class to `PROVIDERS`. Add a hostname hint
+to `HOST_HINTS` if the host can be recognized from the `origin` URL. Mock the
+CLI/HTTP layer in `tests/test_providers.py`; tests never hit the network.
+
 ## Releases (maintainers)
 
 Bump `version` in `pyproject.toml` + `__version__` in `src/repokg/__init__.py`,

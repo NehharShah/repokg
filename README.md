@@ -32,8 +32,18 @@ pipx install repokg        # or: pip install repokg
 pipx install git+https://github.com/NehharShah/repokg
 ```
 
-Requirements: Python ≥ 3.9, `git`. Optional: [`gh`](https://cli.github.com) (logged
-in) for the PR/branch cross-reference — without it the knowledge graph still builds, minus PR data.
+Requirements: Python ≥ 3.9, `git`. Optional, for the PR/branch cross-reference —
+without it the knowledge graph still builds, minus PR data. The provider is
+auto-detected from the `origin` remote URL (override with `--provider`):
+
+| Host | Provider | Needs |
+|---|---|---|
+| GitHub (default, incl. Enterprise) | `github` | [`gh`](https://cli.github.com), logged in |
+| GitLab (gitlab.com or self-hosted) | `gitlab` | [`glab`](https://gitlab.com/gitlab-org/cli), logged in |
+| Bitbucket Cloud | `bitbucket` | nothing for public repos; `BITBUCKET_TOKEN` (repository/workspace access token) for private ones |
+
+Bitbucket's PR list has no merge timestamp, so merged/closed dates come from the
+PR's last-updated time.
 
 ## Usage
 
@@ -73,7 +83,7 @@ timeline eras, and gotchas alongside the deterministic structure.
 | `repokg diff [path]` | Report what changed between two graphs; exit 1 if the shape changed |
 
 Flags: `--out DIR` (default `<repo>/.repokg`), `--md FILE` (default `<repo>/KNOWLEDGE_GRAPH.md`),
-`--exclude PATTERN` (repeatable), `--no-github`, `--no-cache`, `--pr-limit N`, `--diff`, `--json`,
+`--exclude PATTERN` (repeatable), `--no-github` (skip the PR lookup, whichever provider), `--provider auto|github|gitlab|bitbucket`, `--no-cache`, `--pr-limit N`, `--diff`, `--json`,
 `--from KG.JSON`, `--to KG.JSON`, `--from-ref REF`, `--to-ref REF`,
 `--format text|json|md`, `--no-renames`.
 
@@ -395,8 +405,8 @@ on the knowledge graph discovers your rules — and vice versa.
 
 | Area | How |
 |---|---|
-| Branch classification | `git for-each-ref` + `--merged` ancestry vs the integration branch (auto-detects `staging`/`develop`), cross-referenced with every PR's head ref via `gh` — distinguishes true merges from squash-merges from abandoned work |
-| PR catalog | `gh pr list --state all` — open / merged / closed-unmerged, full appendix table |
+| Branch classification | `git for-each-ref` + `--merged` ancestry vs the integration branch (auto-detects `staging`/`develop`), cross-referenced with every PR/MR's head ref via the PR provider (`gh`, `glab`, or the Bitbucket API) — distinguishes true merges from squash-merges from abandoned work |
+| PR catalog | `gh pr list --state all` (GitHub), `glab api` merge requests (GitLab) or the Bitbucket REST API — open / merged / closed-unmerged, full appendix table |
 | Module inventory | Filesystem walk with LOC per directory, language detection, generated-code flagging |
 | Import graph | Go: `import` blocks resolved against `go.mod` module paths · Python: stdlib `ast` incl. relative imports · JS/TS: `import`/`require` resolution — relative paths, tsconfig/jsconfig `paths` + `baseUrl` aliases (nearest config wins), npm/yarn/pnpm workspace package names · Rust: `use` declarations resolved against Cargo crate names (cross-crate) and `src/` module trees (intra-crate) · Java/Kotlin: imports resolved by longest prefix against `package` declarations. Directory→directory edges with counts |
 | Ops surface | CI workflow names, Dockerfiles, compose files, Helm charts, Makefile targets, config/docs/test/migration dirs |
