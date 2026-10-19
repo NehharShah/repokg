@@ -8,8 +8,8 @@ import json
 import os
 import sys
 
-from . import (__version__, cache, code, deps, diff, facts, findings, github,
-               gitinfo, inject, markdown, ops, prompts, providers, refs,
+from . import (__version__, cache, code, deps, diff, facts, findings,
+               fingerprint, github, gitinfo, inject, markdown, ops, prompts, providers, refs,
                validate)
 
 
@@ -112,7 +112,7 @@ def write_prompts(repo, out, md):
     print("wrote %s (hand this to your AI agent)" % path)
 
 
-def render(out, md):
+def render(out, md, repo=None):
     with open(os.path.join(out, "kg.json"), encoding="utf-8") as f:
         kg = json.load(f)
     narratives = {}
@@ -137,7 +137,35 @@ def render(out, md):
         f.write(doc)
     state = "enriched" if narratives else "structure-only; run .repokg/prompts/enrich.md to enrich"
     print("wrote %s (%s)" % (md, state))
+    if repo is not None:
+        _stamp_narratives(repo, out, kg, narratives)
     return 0
+
+
+def _stamp_narratives(repo, out, kg, narratives):
+    """Record what each enriched module contained, for staleness checks.
+
+    A lock that cannot be written costs the staleness signal and nothing
+    else, so it is reported and the render still succeeds.
+    """
+    try:
+        summary, notes = fingerprint.stamp(repo, out, kg, narratives)
+    except (RuntimeError, OSError) as e:
+        print("note: %s not written (%s); narrative staleness cannot be "
+              "tracked" % (fingerprint.LOCK_NAME, e))
+        return
+    for line in notes:
+        print("note: " + line)
+    n_new, n_kept = len(summary["stamped"]), len(summary["kept"])
+    if n_new or n_kept:
+        print("wrote %s (%d modules stamped, %d unchanged)"
+              % (os.path.join(out, fingerprint.LOCK_NAME), n_new, n_kept))
+    if summary["untracked"]:
+        print("note: %d narrative entr%s match no scanned module with code "
+              "files, so their staleness is not tracked: %s"
+              % (len(summary["untracked"]),
+                 "y" if len(summary["untracked"]) == 1 else "ies",
+                 ", ".join(summary["untracked"])))
 
 
 def do_inject(repo, md, diff=False):
@@ -418,7 +446,7 @@ def main(argv=None):
         elif args.command == "prompts":
             write_prompts(repo, out, md)
         elif args.command == "render":
-            return render(out, md)
+            return render(out, md, repo)
         elif args.command == "inject":
             do_inject(repo, md, diff=args.diff)
         elif args.command == "audit":
@@ -437,7 +465,7 @@ def main(argv=None):
             scan(repo, out, args.no_github, args.pr_limit, exclude,
                  not args.no_cache, args.provider)
             write_prompts(repo, out, md)
-            return render(out, md)
+            return render(out, md, repo)
     except RuntimeError as e:
         print("error: %s" % e, file=sys.stderr)
         return 1

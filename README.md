@@ -284,6 +284,11 @@ be turned off with `--no-renames`.
 
 Agent-written `narratives.json` is schema-validated before rendering — malformed
 enrichment fails loudly with errors precise enough for the agent to self-correct.
+On render, each enriched module is also stamped with a content fingerprint (its code
+files' git blob shas) in `.repokg/narratives.lock.json`, so a later check can tell when a
+purpose line has outlived the code it describes. The lock is machine-written, kept apart
+from `narratives.json`, and removed by `repokg clean`; re-rendering keeps a module's stamp
+unless its narrative text changed.
 (Findings/confidence design inspired by [RepoCanon](https://github.com/NehharShah/repocanon).)
 
 ## Agent integration
