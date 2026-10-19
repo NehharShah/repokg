@@ -9,11 +9,13 @@ import os
 import sys
 
 from . import (__version__, cache, code, deps, diff, facts, findings, github,
-               gitinfo, inject, markdown, ops, prompts, refs, validate)
+               gitinfo, inject, markdown, ops, prompts, providers, refs,
+               validate)
 
 
 def build_graph(repo, out, no_github, pr_limit, exclude=(), use_cache=True,
-                stream=None, cache_off_note="disabled (--no-cache)"):
+                stream=None, cache_off_note="disabled (--no-cache)",
+                provider="auto"):
     """Assemble the knowledge graph and return it, without writing kg.json.
 
     `scan` writes what this returns. `diff` cannot: the document already in
@@ -30,7 +32,7 @@ def build_graph(repo, out, no_github, pr_limit, exclude=(), use_cache=True,
     if no_github:
         prs, note = [], "GitHub lookup disabled (--no-github)"
     else:
-        prs, note = github.collect(repo, pr_limit)
+        prs, note = providers.collect(repo, pr_limit, provider)
     github.classify(branches, prs, info["trunk"], info["integration"])
     walk_stats = {}
     # single filesystem walk, shared by all collectors — exclusions inherit
@@ -73,8 +75,10 @@ def build_graph(repo, out, no_github, pr_limit, exclude=(), use_cache=True,
     return kg
 
 
-def scan(repo, out, no_github, pr_limit, exclude=(), use_cache=True):
-    kg = build_graph(repo, out, no_github, pr_limit, exclude, use_cache)
+def scan(repo, out, no_github, pr_limit, exclude=(), use_cache=True,
+         provider="auto"):
+    kg = build_graph(repo, out, no_github, pr_limit, exclude, use_cache,
+                     provider=provider)
     os.makedirs(out, exist_ok=True)
     path = os.path.join(out, "kg.json")
     with open(path, "w", encoding="utf-8") as f:
@@ -189,7 +193,7 @@ def check(repo, out, md):
 
 def do_diff(repo, out, from_graph, to_graph, fmt, no_github, pr_limit,
             exclude=(), use_cache=True, detect_renames=True,
-            from_ref=None, to_ref=None):
+            from_ref=None, to_ref=None, provider="auto"):
     """Report what changed between two knowledge graphs.
 
     Exit 0 when the graph's shape is unchanged, 1 when it changed, 2 on
@@ -226,7 +230,8 @@ def do_diff(repo, out, from_graph, to_graph, fmt, no_github, pr_limit,
     # falling through to the default baseline would quietly answer a
     # different question than the one asked.
     if from_ref is not None:
-        old = _at_ref(repo, from_ref, no_github, pr_limit, exclude)
+        old = _at_ref(repo, from_ref, no_github, pr_limit, exclude,
+                        provider)
     elif from_graph:
         old = _load_graph(from_graph, "baseline", "")
     else:
@@ -235,14 +240,16 @@ def do_diff(repo, out, from_graph, to_graph, fmt, no_github, pr_limit,
     if old is None:
         return 2
     if to_ref is not None:
-        new = _at_ref(repo, to_ref, no_github, pr_limit, exclude)
+        new = _at_ref(repo, to_ref, no_github, pr_limit, exclude,
+                      provider)
     elif to_graph:
         new = _load_graph(to_graph, "comparison", "")
     else:
         try:
             # progress lines to stderr: stdout is the report, and may be piped
             new = build_graph(repo, out, no_github, pr_limit, exclude,
-                              use_cache, stream=sys.stderr)
+                              use_cache, stream=sys.stderr,
+                              provider=provider)
         except (RuntimeError, OSError) as e:
             # A scan that cannot run is an error, not an architectural change.
             # main() maps these to 1, and 1 is precisely what a CI job reads
@@ -273,7 +280,7 @@ def do_diff(repo, out, from_graph, to_graph, fmt, no_github, pr_limit,
     return 1 if delta["shape_changed"] else 0
 
 
-def _at_ref(repo, ref, no_github, pr_limit, exclude):
+def _at_ref(repo, ref, no_github, pr_limit, exclude, provider="auto"):
     """The graph as it was at `ref`, or None having said on stderr why not.
 
     The cache is off and its directory is inside the throwaway checkout, so a
@@ -297,7 +304,8 @@ def _at_ref(repo, ref, no_github, pr_limit, exclude):
             return build_graph(tree, os.path.join(tree, ".repokg"), no_github,
                                pr_limit, exclude, use_cache=False,
                                stream=sys.stderr,
-                               cache_off_note="off for a ref scan")
+                               cache_off_note="off for a ref scan",
+                               provider=provider)
     except (RuntimeError, OSError) as e:
         print("error: %s" % e, file=sys.stderr)
         return None
@@ -349,7 +357,12 @@ def main(argv=None):
                          "`*` crosses `/`, so '*fixtures' matches any depth). "
                          "Unioned with <repo>/.repokgignore (one glob per "
                          "line, # comments)")
-    ap.add_argument("--no-github", action="store_true", help="skip gh PR lookup")
+    ap.add_argument("--no-github", action="store_true",
+                    help="skip the PR lookup (whichever provider)")
+    ap.add_argument("--provider", default="auto",
+                    choices=["auto"] + sorted(providers.PROVIDERS),
+                    help="where PRs/MRs come from (default: auto-detect from "
+                         "the origin remote URL)")
     ap.add_argument("--no-cache", action="store_true",
                     help="ignore <out>/cache.json and re-parse every file; "
                          "the cache is an optimization only, so this changes "
@@ -401,7 +414,7 @@ def main(argv=None):
     try:
         if args.command == "scan":
             scan(repo, out, args.no_github, args.pr_limit, exclude,
-                 not args.no_cache)
+                 not args.no_cache, args.provider)
         elif args.command == "prompts":
             write_prompts(repo, out, md)
         elif args.command == "render":
@@ -419,10 +432,10 @@ def main(argv=None):
                            args.fmt or ("json" if args.json else "text"),
                            args.no_github, args.pr_limit, exclude,
                            not args.no_cache, not args.no_renames,
-                           args.from_ref, args.to_ref)
+                           args.from_ref, args.to_ref, args.provider)
         else:  # generate
             scan(repo, out, args.no_github, args.pr_limit, exclude,
-                 not args.no_cache)
+                 not args.no_cache, args.provider)
             write_prompts(repo, out, md)
             return render(out, md)
     except RuntimeError as e:

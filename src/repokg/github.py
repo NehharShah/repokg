@@ -1,10 +1,5 @@
-"""GitHub collectors (via `gh` CLI) and branch x PR classification."""
-
-import json
-import shutil
-import subprocess
-
-FIELDS = "number,title,state,headRefName,author,createdAt,mergedAt,closedAt,isDraft"
+"""Branch x PR classification. Provider-agnostic: it only reads the normalized
+PR shape that `providers` produces, so it works for any host."""
 
 # Branch statuses:
 #   trunk / integration          - the long-lived branches
@@ -13,32 +8,6 @@ FIELDS = "number,title,state,headRefName,author,createdAt,mergedAt,closedAt,isDr
 #   squash-merged                - not an ancestor, but its PR was merged (squash/rebase)
 #   abandoned                    - only closed-without-merge PRs
 #   stale                        - no PR ever opened
-
-
-def collect(repo, limit=1000):
-    """Return (prs, note). Degrades gracefully when gh is unavailable."""
-    if not shutil.which("gh"):
-        return [], "gh CLI not found; PR data skipped"
-    p = subprocess.run(
-        ["gh", "pr", "list", "--state", "all", "--limit", str(limit), "--json", FIELDS],
-        cwd=repo, capture_output=True, text=True)
-    if p.returncode != 0:
-        return [], "gh failed: " + p.stderr.strip()[:200]
-    prs = []
-    for x in json.loads(p.stdout or "[]"):
-        prs.append({
-            "number": x["number"],
-            "title": x.get("title", "").strip(),
-            "state": x.get("state", ""),
-            "head": x.get("headRefName", ""),
-            "author": (x.get("author") or {}).get("login", ""),
-            "created": (x.get("createdAt") or "")[:10],
-            "merged": (x.get("mergedAt") or "")[:10],
-            "closed": (x.get("closedAt") or "")[:10],
-            "draft": bool(x.get("isDraft")),
-        })
-    prs.sort(key=lambda pr: pr["number"])
-    return prs, ""
 
 
 def classify(branches, prs, trunk, integration):
