@@ -68,6 +68,30 @@ The agent explores the code, writes `.repokg/narratives.json`, and runs
 `repokg render` — KNOWLEDGE_GRAPH.md now carries verified purposes, data flows,
 timeline eras, and gotchas alongside the deterministic structure.
 
+### The enrichment loop
+
+Enrichment is not a one-off. Structure refreshes on every scan, but a purpose line
+written by an agent stays frozen while the module under it is rewritten. repokg tracks
+that, so every run after the first re-verifies only what moved:
+
+```
+repokg generate .            # scan, write the prompt, render (stamps each enriched module)
+  agent: follow .repokg/prompts/enrich.md      # first run: full enrichment
+  ... code changes ...
+repokg check .               # narrative stale: lib (3 of 5 files changed since enrichment)
+  agent: follow .repokg/prompts/enrich.md      # re-run: only the flagged modules
+repokg render . --restamp lib                  # for each flagged module whose line still holds
+repokg check .               # fresh
+```
+
+On a re-run (`.repokg/narratives.json` already exists) the prompt tells the agent to take
+the flagged modules from `repokg check` or `repokg audit --json`, re-read only those,
+rewrite a purpose line that is now wrong, and `--restamp` the ones that still hold. A
+rewritten line is re-stamped by the render itself. Modules that were not flagged are
+neither re-read nor re-worded. The prompt also forbids `--restamp` on a module the agent
+has not re-read, since the stamp is the claim "verified against the current code". Details
+of the fingerprints, the threshold and `--restamp` are under [Honesty layer](#honesty-layer).
+
 ### Commands
 
 | Command | Effect |
@@ -345,6 +369,11 @@ following step can react without re-running anything:
 The action installs repokg from its own checkout rather than from PyPI, so
 `@v0.4.5` runs repokg 0.4.5 by construction — there is no second version to
 keep in sync and no way for the two to drift apart.
+
+In check mode a drifted narrative fails the step like a stale graph does, and the
+message says which fix applies: `repokg generate` for a graph behind `HEAD`, re-verify
+and `repokg render --restamp MODULE` for a stale narrative. The narrative half needs
+`.repokg/narratives.lock.json` to be committed along with the graph.
 
 **Check mode needs a committed graph.** It compares the `HEAD` recorded in
 `.repokg/kg.json` against the actual `HEAD`, so a repo that gitignores
