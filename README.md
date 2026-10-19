@@ -79,13 +79,13 @@ timeline eras, and gotchas alongside the deterministic structure.
 | `repokg inject [path]` | Wire the knowledge graph into `CLAUDE.md` / `AGENTS.md` / Cursor rules (`--diff` for dry run) |
 | `repokg audit [path]` | Show every *inferred* conclusion with confidence + evidence (`--json` for machines) |
 | `repokg clean [path]` | Remove everything repokg authored — never touches your content (`--diff` for dry run) |
-| `repokg check [path]` | Exit 1 if the knowledge graph is stale vs `HEAD` (CI-friendly) |
+| `repokg check [path]` | Exit 1 if the knowledge graph is stale vs `HEAD`, or an enriched module's narrative has drifted from its code (CI-friendly) |
 | `repokg diff [path]` | Report what changed between two graphs; exit 1 if the shape changed |
 
 Flags: `--out DIR` (default `<repo>/.repokg`), `--md FILE` (default `<repo>/KNOWLEDGE_GRAPH.md`),
 `--exclude PATTERN` (repeatable), `--no-github` (skip the PR lookup, whichever provider), `--provider auto|github|gitlab|bitbucket`, `--no-cache`, `--pr-limit N`, `--diff`, `--json`,
 `--from KG.JSON`, `--to KG.JSON`, `--from-ref REF`, `--to-ref REF`,
-`--format text|json|md`, `--no-renames`.
+`--format text|json|md`, `--no-renames`, `--stale-threshold PERCENT`, `--restamp MODULE`.
 
 ### Structural diff
 
@@ -289,6 +289,23 @@ files' git blob shas) in `.repokg/narratives.lock.json`, so a later check can te
 purpose line has outlived the code it describes. The lock is machine-written, kept apart
 from `narratives.json`, and removed by `repokg clean`; re-rendering keeps a module's stamp
 unless its narrative text changed.
+
+`repokg check` reads that lock as a second dimension next to "is the graph at `HEAD`":
+
+```
+$ repokg check .
+narrative stale: internal/hedging/risk (12 of 40 files changed since enrichment)
+re-verify the flagged modules, then `repokg render --restamp MODULE` for each one that still holds
+```
+
+A module is flagged when more than `--stale-threshold PERCENT` of its files were edited,
+added or removed since its stamp (default `0`: any change; uncommitted edits count).
+Untouched modules stay green. When you re-read a flagged module and its purpose line still
+holds, `repokg render --restamp internal/hedging/risk` (repeatable) re-baselines it without
+rewording anything; naming a module with no narrative is an error. Stale narratives also show
+up in `repokg audit` as `narrative` findings, with the changed files as evidence. If
+`narratives.json` exists but no lock does, `check` says so rather than reporting the
+narratives fresh.
 (Findings/confidence design inspired by [RepoCanon](https://github.com/NehharShah/repocanon).)
 
 ## Agent integration

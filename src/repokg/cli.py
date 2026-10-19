@@ -112,7 +112,7 @@ def write_prompts(repo, out, md):
     print("wrote %s (hand this to your AI agent)" % path)
 
 
-def render(out, md, repo=None):
+def render(out, md, repo=None, restamp=()):
     with open(os.path.join(out, "kg.json"), encoding="utf-8") as f:
         kg = json.load(f)
     narratives = {}
@@ -132,24 +132,31 @@ def render(out, md, repo=None):
             print("fix the file (schema in .repokg/prompts/enrich.md) and re-run "
                   "`repokg render`", file=sys.stderr)
             return 1
+    unknown = sorted(set(restamp) - set(narratives.get("modules") or {}))
+    if unknown:
+        print("error: cannot restamp %s: no narrative describes %s in %s"
+              % (", ".join(unknown), "it" if len(unknown) == 1 else "them",
+                 npath), file=sys.stderr)
+        return 1
     doc = markdown.render(kg, narratives)
     with open(md, "w", encoding="utf-8") as f:
         f.write(doc)
     state = "enriched" if narratives else "structure-only; run .repokg/prompts/enrich.md to enrich"
     print("wrote %s (%s)" % (md, state))
     if repo is not None:
-        _stamp_narratives(repo, out, kg, narratives)
+        _stamp_narratives(repo, out, kg, narratives, restamp)
     return 0
 
 
-def _stamp_narratives(repo, out, kg, narratives):
+def _stamp_narratives(repo, out, kg, narratives, restamp=()):
     """Record what each enriched module contained, for staleness checks.
 
     A lock that cannot be written costs the staleness signal and nothing
     else, so it is reported and the render still succeeds.
     """
     try:
-        summary, notes = fingerprint.stamp(repo, out, kg, narratives)
+        summary, notes = fingerprint.stamp(repo, out, kg, narratives,
+                                             restamp)
     except (RuntimeError, OSError) as e:
         print("note: %s not written (%s); narrative staleness cannot be "
               "tracked" % (fingerprint.LOCK_NAME, e))
@@ -157,9 +164,10 @@ def _stamp_narratives(repo, out, kg, narratives):
     for line in notes:
         print("note: " + line)
     n_new, n_kept = len(summary["stamped"]), len(summary["kept"])
-    if n_new or n_kept:
-        print("wrote %s (%d modules stamped, %d unchanged)"
-              % (os.path.join(out, fingerprint.LOCK_NAME), n_new, n_kept))
+    n_re = len(summary["restamped"])
+    if n_new or n_kept or n_re:
+        print("wrote %s (%d modules stamped, %d restamped, %d unchanged)"
+              % (os.path.join(out, fingerprint.LOCK_NAME), n_new, n_re, n_kept))
     if summary["untracked"]:
         print("note: %d narrative entr%s match no scanned module with code "
               "files, so their staleness is not tracked: %s"
@@ -188,11 +196,18 @@ def do_clean(repo, out, md, diff=False):
                             " (dry run)" if diff and "SKIPPED" not in action else ""))
 
 
-def audit(out, as_json=False):
+def audit(out, as_json=False, repo=None, threshold=0.0):
     with open(os.path.join(out, "kg.json"), encoding="utf-8") as f:
         kg = json.load(f)
-    found = kg.get("findings", [])
-    notes = kg.get("uncertainty", [])
+    found = list(kg.get("findings", []))
+    notes = list(kg.get("uncertainty", []))
+    if repo is not None:
+        # live, not stored in kg.json: it depends on the lock and the working
+        # tree as they are now, which a scan from earlier cannot know
+        more, extra = findings.narrative(*_narrative_drift(repo, out, kg,
+                                                           threshold))
+        found += more
+        notes += extra
     if not found and not notes:
         print("no findings recorded (re-run `repokg scan` with repokg >= 0.2)")
         return
@@ -202,20 +217,68 @@ def audit(out, as_json=False):
         print(findings.render_text(found, notes))
 
 
-def check(repo, out, md):
-    """Exit 0 if the knowledge graph matches HEAD, 1 if stale/missing. CI-friendly."""
+def _narrative_drift(repo, out, kg, threshold):
+    """(stale, tracked, notes) from the lock, or a note if git could not say."""
+    try:
+        return fingerprint.drift(repo, out, kg, threshold)
+    except (RuntimeError, OSError) as e:
+        return [], 0, ["narrative staleness not checked: %s" % e]
+
+
+def _has_narratives(out):
+    try:
+        with open(os.path.join(out, "narratives.json"), encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return isinstance(doc, dict) and bool(doc.get("modules"))
+
+
+def check(repo, out, md, threshold=0.0):
+    """Exit 0 if the knowledge graph and its narratives are current, 1 if
+    either is stale or missing. CI-friendly.
+
+    Two independent dimensions: the graph against HEAD, and each enriched
+    module's narrative against the code it was stamped with (see
+    fingerprint.py). Both are always reported, so one failure cannot hide the
+    other. `threshold` is the percentage of a module's files that must have
+    changed before its narrative counts as stale; at the default 0, any change
+    does. Narratives are only judged when a lock exists — before the first
+    render after enrichment there is nothing to compare against, which is said
+    rather than passed as fresh.
+    """
     apath = os.path.join(out, "kg.json")
     if not os.path.isfile(apath) or not os.path.isfile(md):
         print("stale: knowledge graph not generated (run `repokg generate`)")
         return 1
     with open(apath, encoding="utf-8") as f:
-        stored = json.load(f).get("repo", {}).get("head", "")
+        kg = json.load(f)
+    stored = kg.get("repo", {}).get("head", "")
     head = gitinfo.try_run(repo, "rev-parse", "HEAD")
+    stale = False
     if stored and head and stored != head:
         print("stale: knowledge graph at %s, HEAD is %s (run `repokg generate`)"
               % (stored[:12], head[:12]))
+        stale = True
+
+    drifted, tracked, notes = _narrative_drift(repo, out, kg, threshold)
+    for item in drifted:
+        print(fingerprint.describe(item))
+    if drifted:
+        print("re-verify the flagged modules, then `repokg render --restamp "
+              "MODULE` for each one that still holds")
+        stale = True
+    for line in notes:
+        print("note: " + line)
+    if not tracked and not notes and _has_narratives(out):
+        print("note: narratives exist but %s does not; run `repokg render` to "
+              "start tracking narrative staleness" % fingerprint.LOCK_NAME)
+    if stale:
         return 1
-    print("fresh: knowledge graph matches HEAD %s" % (head[:12] or "(unknown)"))
+    suffix = ("; %d narrative%s current" % (tracked, "" if tracked == 1 else "s")
+              if tracked else "")
+    print("fresh: knowledge graph matches HEAD %s%s"
+          % (head[:12] or "(unknown)", suffix))
     return 0
 
 
@@ -373,7 +436,8 @@ def main(argv=None):
                          "inject: add knowledge-graph pointer to CLAUDE.md/AGENTS.md/cursor rules | "
                          "audit: show inferred conclusions with confidence + evidence | "
                          "clean: remove everything repokg authored | "
-                         "check: exit 1 if knowledge graph is stale vs HEAD | "
+                         "check: exit 1 if the knowledge graph is stale vs HEAD "
+                         "or an enriched module's narrative has drifted | "
                          "diff: report what changed between two graphs, "
                          "exit 1 if the shape changed")
     ap.add_argument("path", nargs="?", default=".", help="repository path (default: .)")
@@ -395,6 +459,15 @@ def main(argv=None):
                     help="ignore <out>/cache.json and re-parse every file; "
                          "the cache is an optimization only, so this changes "
                          "how long a scan takes and nothing it produces")
+    ap.add_argument("--stale-threshold", type=float, default=0.0,
+                    metavar="PERCENT",
+                    help="check/audit: flag a module's narrative as stale "
+                         "when more than this percentage of its files changed "
+                         "since enrichment (default 0: any change)")
+    ap.add_argument("--restamp", action="append", default=[], metavar="MODULE",
+                    help="render/generate: re-baseline this module's narrative "
+                         "against the code as it is now, for when you "
+                         "re-verified it and it still holds (repeatable)")
     ap.add_argument("--pr-limit", type=int, default=1000, help="max PRs to fetch (default 1000)")
     ap.add_argument("--diff", action="store_true",
                     help="inject/clean: dry run, print what would change")
@@ -430,6 +503,11 @@ def main(argv=None):
         print("repokg %s" % __version__)
         return 0
 
+    if not 0 <= args.stale_threshold <= 100:
+        print("error: --stale-threshold must be between 0 and 100",
+              file=sys.stderr)
+        return 2
+
     repo = os.path.abspath(args.path)
     if not os.path.isdir(repo):
         print("error: %s is not a directory" % repo, file=sys.stderr)
@@ -446,15 +524,16 @@ def main(argv=None):
         elif args.command == "prompts":
             write_prompts(repo, out, md)
         elif args.command == "render":
-            return render(out, md, repo)
+            return render(out, md, repo, args.restamp)
         elif args.command == "inject":
             do_inject(repo, md, diff=args.diff)
         elif args.command == "audit":
-            audit(out, as_json=args.json)
+            audit(out, as_json=args.json, repo=repo,
+                  threshold=args.stale_threshold)
         elif args.command == "clean":
             do_clean(repo, out, md, diff=args.diff)
         elif args.command == "check":
-            return check(repo, out, md)
+            return check(repo, out, md, args.stale_threshold)
         elif args.command == "diff":
             return do_diff(repo, out, args.from_graph, args.to_graph,
                            args.fmt or ("json" if args.json else "text"),
@@ -465,7 +544,7 @@ def main(argv=None):
             scan(repo, out, args.no_github, args.pr_limit, exclude,
                  not args.no_cache, args.provider)
             write_prompts(repo, out, md)
-            return render(out, md, repo)
+            return render(out, md, repo, args.restamp)
     except RuntimeError as e:
         print("error: %s" % e, file=sys.stderr)
         return 1
