@@ -112,6 +112,23 @@ def build(kg):
     return findings, notes
 
 
+def narrative(stale, tracked, notes):
+    """Findings for narratives that have drifted from the code they describe.
+
+    Separate from `build`: this is computed from the narratives lock and the
+    working tree as they are when asked, not from the scan. The conclusion is
+    an inference — a changed file makes a purpose line unverified, not wrong —
+    so it is registered with its evidence and at medium confidence.
+    """
+    found = [_f(
+        "narrative", "%s: narrative may be stale" % s["module"],
+        "%d of %d files changed since the narrative was stamped; the change "
+        "may not affect the purpose line, but nothing has verified that"
+        % (len(s["changed"]), s["total"]),
+        s["changed"], "medium") for s in stale]
+    return found, list(notes)
+
+
 def render_text(findings, notes):
     """Plain-text audit table (stdlib only, no rich)."""
     out = []

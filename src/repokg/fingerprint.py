@@ -111,24 +111,35 @@ def read_lock(out):
         with open(path, encoding="utf-8") as f:
             doc = json.load(f)
     except (OSError, ValueError) as e:
-        return {}, "%s unreadable (%s); rewriting it" % (LOCK_NAME, e)
+        return {}, "%s unreadable (%s)" % (LOCK_NAME, e)
     mods = doc.get("modules") if isinstance(doc, dict) else None
     if (not isinstance(mods, dict)
             or doc.get("lockfile_version") != LOCK_VERSION):
-        return {}, "%s not in a format this repokg reads; rewriting it" % LOCK_NAME
+        return {}, "%s is not in a format this repokg reads" % LOCK_NAME
     return {k: v for k, v in mods.items() if isinstance(v, dict)}, ""
 
 
-def stamp(repo, out, kg, narratives):
+def stamp(repo, out, kg, narratives, restamp=()):
     """Write <out>/narratives.lock.json for the modules `narratives` describes.
 
+    `restamp` names modules to re-baseline against the code as it is now even
+    though their narrative text is unchanged — "I re-verified this, and it
+    still holds". A name the narratives do not describe is a ValueError, since
+    silently ignoring a typo would leave the module flagged stale with no hint
+    why.
+
     Returns (summary, notes): `summary` is {"stamped": [...], "kept": [...],
-    "untracked": [...]} and `notes` are lines for the caller to print.
-    Nothing is written when no narrative describes a module.
+    "restamped": [...], "untracked": [...]} and `notes` are lines for the
+    caller to print. Nothing is written when no narrative describes a module.
     """
     described = narratives.get("modules") or {}
-    summary = {"stamped": [], "kept": [], "untracked": []}
+    summary = {"stamped": [], "kept": [], "restamped": [], "untracked": []}
     notes = []
+    missing = sorted(set(restamp) - set(described))
+    if missing:
+        raise ValueError("cannot restamp %s: no narrative describes %s"
+                         % (", ".join(missing),
+                            "it" if len(missing) == 1 else "them"))
     if not described:
         return summary, notes
 
@@ -139,12 +150,15 @@ def stamp(repo, out, kg, narratives):
 
     previous, note = read_lock(out)
     if note:
-        notes.append(note)
+        notes.append(note + "; rewriting it")
     entries = {}
     for path, now in sorted(snap.items()):
         text_sha = _sha256(described[path])
         old = previous.get(path)
-        if old and old.get("narrative") == text_sha:
+        if path in restamp:
+            entries[path] = dict(now, narrative=text_sha)
+            summary["restamped"].append(path)
+        elif old and old.get("narrative") == text_sha:
             entries[path] = old
             summary["kept"].append(path)
         else:
@@ -164,3 +178,50 @@ def stamp(repo, out, kg, narratives):
         with open(lock, "w", encoding="utf-8") as f:
             f.write(doc)
     return summary, notes
+
+
+def drift(repo, out, kg, threshold=0.0):
+    """Which stamped narratives have outlived their code.
+
+    Returns (stale, tracked, notes). `tracked` is how many lock entries were
+    measured; `stale` lists one dict per module whose share of changed files
+    exceeds `threshold` percent: {"module", "changed" (sorted file names),
+    "total", "percent"}. A file counts as changed if it was edited, added or
+    removed since the stamp, so total is the union of the two file sets and a
+    module that lost every code file reads as 100% changed.
+
+    With the default threshold of 0 any change at all is stale, which is what
+    makes an edited module flag while untouched ones stay green. Raising it
+    trades sensitivity for fewer flags on large modules.
+
+    Raises RuntimeError/OSError if git cannot hash the files; callers decide
+    how loudly to say the check did not run.
+    """
+    entries, note = read_lock(out)
+    notes = [note] if note else []
+    if not entries:
+        return [], 0, notes
+    exclude = (kg.get("exclude") or {}).get("patterns") or ()
+    now = snapshot(repo, sorted(entries), exclude)
+    stale = []
+    for path, entry in sorted(entries.items()):
+        old_files = entry.get("files")
+        if not isinstance(old_files, dict):
+            notes.append("%s: lock entry has no file map; re-run "
+                         "`repokg render --restamp %s`" % (path, path))
+            continue
+        new_files = now.get(path, {}).get("files", {})
+        names = set(old_files) | set(new_files)
+        changed = sorted(n for n in names if old_files.get(n) != new_files.get(n))
+        percent = 100.0 * len(changed) / len(names) if names else 0.0
+        if changed and percent > threshold:
+            stale.append({"module": path, "changed": changed,
+                          "total": len(names), "percent": percent})
+    return stale, len(entries), notes
+
+
+def describe(item):
+    """The line `check` prints for one stale module."""
+    n, total = len(item["changed"]), item["total"]
+    return ("narrative stale: %s (%d of %d file%s changed since enrichment)"
+            % (item["module"], n, total, "" if total == 1 else "s"))

@@ -181,7 +181,7 @@ class TestRestamping(LockCase):
     def test_rerender_reports_kept_modules(self):
         self.generate()
         _, out = self.generate()
-        self.assertIn("0 modules stamped, 2 unchanged", out)
+        self.assertIn("0 modules stamped, 0 restamped, 2 unchanged", out)
 
     def test_rewritten_narrative_is_restamped(self):
         self.generate()
