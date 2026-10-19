@@ -25,6 +25,8 @@ class TestDetect(unittest.TestCase):
 
     def test_detect(self):
         self.assertEqual(providers.detect("git@github.com:o/r.git"), "github")
+        self.assertEqual(providers.detect("https://gitlab.com/g/r.git"), "gitlab")
+        self.assertEqual(providers.detect("git@gitlab.corp.io:g/r.git"), "gitlab")
 
     def test_unrecognized_host_keeps_the_github_default(self):
         # GitHub Enterprise hosts have arbitrary names; `gh` handles them.
@@ -98,14 +100,106 @@ class TestGitHubProvider(unittest.TestCase):
         self.assertEqual(prs[1]["merged"], "2024-02-03")
 
 
+def mr(iid, state, branch, **kw):
+    x = {"iid": iid, "title": "mr %d" % iid, "state": state,
+         "source_branch": branch, "author": {"username": "dev"},
+         "created_at": "2024-03-01T08:00:00.000Z", "merged_at": None,
+         "closed_at": None, "draft": False}
+    x.update(kw)
+    return x
+
+
+class TestGitLabProvider(unittest.TestCase):
+    def fetch(self, pages, limit=1000, which="/bin/glab"):
+        """Run fetch_prs with `glab api` answering one JSON page per call."""
+        outs = [completed(p if isinstance(p, str) else json.dumps(p))
+                if not isinstance(p, subprocess.CompletedProcess) else p
+                for p in pages]
+        with mock.patch("shutil.which", return_value=which), \
+                mock.patch("subprocess.run", side_effect=outs) as run:
+            res = providers.GitLabProvider().fetch_prs("/r", limit)
+        return res, run
+
+    def test_missing_cli_degrades_with_a_note(self):
+        (prs, note), run = self.fetch([], which=None)
+        self.assertEqual(prs, [])
+        self.assertEqual(note, "glab CLI not found; PR data skipped")
+        run.assert_not_called()
+
+    def test_normalizes_states_and_fields(self):
+        (prs, note), run = self.fetch([[
+            mr(3, "merged", "feat/c", merged_at="2024-03-05T01:00:00Z"),
+            mr(2, "closed", "feat/b", closed_at="2024-03-04T01:00:00Z"),
+            mr(1, "opened", "feat/a", draft=True),
+            mr(4, "locked", "feat/d"),
+        ]])
+        self.assertEqual(note, "")
+        self.assertEqual([p["number"] for p in prs], [1, 2, 3, 4])
+        self.assertEqual([p["state"] for p in prs],
+                         ["OPEN", "CLOSED", "MERGED", "OPEN"])
+        self.assertEqual(prs[2], {
+            "number": 3, "title": "mr 3", "state": "MERGED", "head": "feat/c",
+            "author": "dev", "created": "2024-03-01", "merged": "2024-03-05",
+            "closed": "", "draft": False})
+        self.assertTrue(prs[0]["draft"])
+        args = run.call_args[0][0]
+        self.assertEqual(args[:2], ["glab", "api"])
+        self.assertIn("state=all", args[2])
+
+    def test_paginates_up_to_the_limit(self):
+        page1 = [mr(i, "merged", "b%d" % i) for i in range(300, 200, -1)]
+        page2 = [mr(i, "merged", "b%d" % i) for i in range(200, 100, -1)]
+        (prs, note), run = self.fetch([page1, page2], limit=150)
+        self.assertEqual(note, "")
+        self.assertEqual(len(prs), 150)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(max(p["number"] for p in prs), 300)  # newest kept
+
+    def test_failure_degrades_with_a_note(self):
+        (prs, note), _ = self.fetch([completed(returncode=1, stderr="401")])
+        self.assertEqual((prs, note), ([], "glab failed: 401"))
+
+    def test_failure_on_a_later_page_keeps_what_was_fetched(self):
+        page1 = [mr(i, "opened", "b%d" % i) for i in range(100)]
+        (prs, note), _ = self.fetch([page1, completed(returncode=1, stderr="boom")])
+        self.assertEqual(len(prs), 100)
+        self.assertIn("partial: 100 MRs fetched", note)
+
+    def test_invalid_output_degrades_with_a_note(self):
+        (prs, note), _ = self.fetch(["not json"])
+        self.assertEqual((prs, note), ([], "glab returned invalid JSON"))
+        (prs, note), _ = self.fetch(['{"message": "404"}'])
+        self.assertEqual((prs, note), ([], "glab returned unexpected output"))
+
+
 class TestProviderAgnosticClassification(unittest.TestCase):
     """The same classifier gives the same answer whichever host the PRs came from."""
 
-    def test_squash_merged_branch(self):
-        branches = [{"name": "feat/x", "ref": "origin/feat/x"}]
-        prs = [{"number": 1, "head": "feat/x", "state": "MERGED"}]
-        classify(branches, prs, trunk="main", integration="")
-        self.assertEqual(branches[0]["status"], "squash-merged")
+    def test_gitlab_classifies_like_github(self):
+        gl = [mr(1, "merged", "feat/squashed", merged_at="2024-03-02T00:00:00Z"),
+              mr(2, "closed", "feat/abandoned"),
+              mr(3, "opened", "feat/active")]
+        gh = [{"number": 1, "headRefName": "feat/squashed", "state": "MERGED"},
+              {"number": 2, "headRefName": "feat/abandoned", "state": "CLOSED"},
+              {"number": 3, "headRefName": "feat/active", "state": "OPEN"}]
+
+        def classified(prs):
+            branches = [{"name": n, "ref": "origin/" + n} for n in
+                        ("main", "feat/squashed", "feat/abandoned",
+                         "feat/active", "feat/none")]
+            classify(branches, prs, trunk="main", integration="")
+            return {b["name"]: b["status"] for b in branches}
+
+        with mock.patch("shutil.which", return_value="/bin/x"), \
+                mock.patch("subprocess.run",
+                           return_value=completed(json.dumps(gl))):
+            gl_prs, _ = providers.GitLabProvider().fetch_prs("/r", 10)
+        with mock.patch("shutil.which", return_value="/bin/x"), \
+                mock.patch("subprocess.run",
+                           return_value=completed(json.dumps(gh))):
+            gh_prs, _ = providers.GitHubProvider().fetch_prs("/r", 10)
+        self.assertEqual(classified(gl_prs), classified(gh_prs))
+        self.assertEqual(classified(gl_prs)["feat/squashed"], "squash-merged")
 
 
 if __name__ == "__main__":

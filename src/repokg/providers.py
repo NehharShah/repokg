@@ -61,7 +61,62 @@ class GitHubProvider(PRProvider):
         return prs, ""
 
 
-PROVIDERS = {cls.name: cls for cls in (GitHubProvider,)}
+class GitLabProvider(PRProvider):
+    """Merge requests via `glab api`, which resolves the host and project from
+    the repo's remote (so self-hosted GitLab works) and handles auth."""
+    name = "gitlab"
+    PAGE = 100  # GitLab's per_page ceiling
+    STATES = {"opened": "OPEN", "locked": "OPEN", "merged": "MERGED",
+              "closed": "CLOSED"}
+
+    def fetch_prs(self, repo, limit):
+        if not shutil.which("glab"):
+            return [], "glab CLI not found; PR data skipped"
+        prs, page = [], 1
+        while len(prs) < limit:
+            p = subprocess.run(
+                ["glab", "api", "projects/:id/merge_requests?state=all"
+                 "&order_by=created_at&sort=desc&per_page=%d&page=%d" %
+                 (self.PAGE, page)],
+                cwd=repo, capture_output=True, text=True)
+            if p.returncode != 0:
+                note = "glab failed: " + (p.stderr or p.stdout).strip()[:200]
+                if prs:
+                    note += " (partial: %d MRs fetched)" % len(prs)
+                return self._finish(prs, limit), note
+            try:
+                batch = json.loads(p.stdout or "[]")
+            except ValueError:
+                return self._finish(prs, limit), "glab returned invalid JSON"
+            if not isinstance(batch, list):
+                return self._finish(prs, limit), "glab returned unexpected output"
+            prs.extend(self._normalize(x) for x in batch)
+            if len(batch) < self.PAGE:
+                break
+            page += 1
+        return self._finish(prs, limit), ""
+
+    @staticmethod
+    def _finish(prs, limit):
+        prs = prs[:limit]
+        prs.sort(key=lambda pr: pr["number"])
+        return prs
+
+    def _normalize(self, x):
+        return {
+            "number": x["iid"],
+            "title": (x.get("title") or "").strip(),
+            "state": self.STATES.get(x.get("state"), (x.get("state") or "").upper()),
+            "head": x.get("source_branch") or "",
+            "author": (x.get("author") or {}).get("username", ""),
+            "created": (x.get("created_at") or "")[:10],
+            "merged": (x.get("merged_at") or "")[:10],
+            "closed": (x.get("closed_at") or "")[:10],
+            "draft": bool(x.get("draft") or x.get("work_in_progress")),
+        }
+
+
+PROVIDERS = {cls.name: cls for cls in (GitHubProvider, GitLabProvider)}
 
 # Hostname fragments that identify a host. Anything unrecognized falls back to
 # GitHub, which is what every scan did before providers existed: `gh` resolves
